@@ -38,7 +38,6 @@ static const char *version = "tc35815.c:v" DRV_VERSION "\n";
 #include <linux/string.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
-#include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -66,7 +65,7 @@ static const struct {
 	{ "TOSHIBA TC35815/TX4939" },
 };
 
-static DEFINE_PCI_DEVICE_TABLE(tc35815_pci_tbl) = {
+static const struct pci_device_id tc35815_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA_2, PCI_DEVICE_ID_TOSHIBA_TC35815CF), .driver_data = TC35815CF },
 	{PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA_2, PCI_DEVICE_ID_TOSHIBA_TC35815_NWU), .driver_data = TC35815_NWU },
 	{PCI_DEVICE(PCI_VENDOR_ID_TOSHIBA_2, PCI_DEVICE_ID_TOSHIBA_TC35815_TX4939), .driver_data = TC35815_TX4939 },
@@ -476,7 +475,8 @@ static void free_rxbuf_skb(struct pci_dev *hwdev, struct sk_buff *skb, dma_addr_
 /* Index to functions, as function prototypes. */
 
 static int	tc35815_open(struct net_device *dev);
-static int	tc35815_send_packet(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t	tc35815_send_packet(struct sk_buff *skb,
+					    struct net_device *dev);
 static irqreturn_t	tc35815_interrupt(int irq, void *dev_id);
 static int	tc35815_rx(struct net_device *dev, int limit);
 static int	tc35815_poll(struct napi_struct *napi, int budget);
@@ -887,7 +887,6 @@ static void tc35815_remove_one(struct pci_dev *pdev)
 	mdiobus_free(lp->mii_bus);
 	unregister_netdev(dev);
 	free_netdev(dev);
-	pci_set_drvdata(pdev, NULL);
 }
 
 static int
@@ -1171,19 +1170,12 @@ static int tc35815_tx_full(struct net_device *dev)
 static void tc35815_restart(struct net_device *dev)
 {
 	struct tc35815_local *lp = netdev_priv(dev);
+	int ret;
 
 	if (lp->phy_dev) {
-		int timeout;
-
-		phy_write(lp->phy_dev, MII_BMCR, BMCR_RESET);
-		timeout = 100;
-		while (--timeout) {
-			if (!(phy_read(lp->phy_dev, MII_BMCR) & BMCR_RESET))
-				break;
-			udelay(1);
-		}
-		if (!timeout)
-			printk(KERN_ERR "%s: BMCR reset failed.\n", dev->name);
+		ret = phy_init_hw(lp->phy_dev);
+		if (ret)
+			printk(KERN_ERR "%s: PHY init failed.\n", dev->name);
 	}
 
 	spin_lock_bh(&lp->rx_lock);
@@ -1288,7 +1280,8 @@ tc35815_open(struct net_device *dev)
  * invariant will hold if you make sure that the netif_*_queue()
  * calls are done at the proper times.
  */
-static int tc35815_send_packet(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t
+tc35815_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct tc35815_local *lp = netdev_priv(dev);
 	struct TxFD *txfd;
@@ -1537,7 +1530,7 @@ tc35815_rx(struct net_device *dev, int limit)
 			pci_unmap_single(lp->pci_dev,
 					 lp->rx_skbs[cur_bd].skb_dma,
 					 RX_BUF_SIZE, PCI_DMA_FROMDEVICE);
-			if (!HAVE_DMA_RXALIGN(lp) && NET_IP_ALIGN)
+			if (!HAVE_DMA_RXALIGN(lp) && NET_IP_ALIGN != 0)
 				memmove(skb->data, skb->data - NET_IP_ALIGN,
 					pkt_len);
 			data = skb_put(skb, pkt_len);
@@ -1653,6 +1646,9 @@ static int tc35815_poll(struct napi_struct *napi, int budget)
 		(struct tc35815_regs __iomem *)dev->base_addr;
 	int received = 0, handled;
 	u32 status;
+
+	if (budget <= 0)
+		return received;
 
 	spin_lock(&lp->rx_lock);
 	status = tc_readl(&tr->Int_Src);
@@ -2209,18 +2205,6 @@ MODULE_PARM_DESC(speed, "0:auto, 10:10Mbps, 100:100Mbps");
 module_param_named(duplex, options.duplex, int, 0);
 MODULE_PARM_DESC(duplex, "0:auto, 1:half, 2:full");
 
-static int __init tc35815_init_module(void)
-{
-	return pci_register_driver(&tc35815_pci_driver);
-}
-
-static void __exit tc35815_cleanup_module(void)
-{
-	pci_unregister_driver(&tc35815_pci_driver);
-}
-
-module_init(tc35815_init_module);
-module_exit(tc35815_cleanup_module);
-
+module_pci_driver(tc35815_pci_driver);
 MODULE_DESCRIPTION("TOSHIBA TC35815 PCI 10M/100M Ethernet driver");
 MODULE_LICENSE("GPL");

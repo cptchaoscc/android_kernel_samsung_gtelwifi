@@ -26,6 +26,9 @@ static inline int xt_ct_target(struct sk_buff *skb, struct nf_conn *ct)
 	if (skb->nfct != NULL)
 		return XT_CONTINUE;
 
+	/* special case the untracked ct : we want the percpu object */
+	if (!ct)
+		ct = nf_ct_untracked_get();
 	atomic_inc(&ct->ct_general.use);
 	skb->nfct = &ct->ct_general;
 	skb->nfctinfo = IP_CT_NEW;
@@ -165,8 +168,13 @@ xt_ct_set_timeout(struct nf_conn *ct, const struct xt_tgchk_param *par,
 		goto err_put_timeout;
 	}
 	timeout_ext = nf_ct_timeout_ext_add(ct, timeout, GFP_ATOMIC);
-	if (timeout_ext == NULL)
+	if (!timeout_ext) {
 		ret = -ENOMEM;
+		goto err_put_timeout;
+	}
+
+	rcu_read_unlock();
+	return ret;
 
 err_put_timeout:
 	__xt_ct_tg_timeout_put(timeout);
@@ -178,21 +186,36 @@ out:
 #endif
 }
 
+static u16 xt_ct_flags_to_dir(const struct xt_ct_target_info_v1 *info)
+{
+	switch (info->flags & (XT_CT_ZONE_DIR_ORIG |
+			       XT_CT_ZONE_DIR_REPL)) {
+	case XT_CT_ZONE_DIR_ORIG:
+		return NF_CT_ZONE_DIR_ORIG;
+	case XT_CT_ZONE_DIR_REPL:
+		return NF_CT_ZONE_DIR_REPL;
+	default:
+		return NF_CT_DEFAULT_ZONE_DIR;
+	}
+}
+
 static int xt_ct_tg_check(const struct xt_tgchk_param *par,
 			  struct xt_ct_target_info_v1 *info)
 {
-	struct nf_conntrack_tuple t;
+	struct nf_conntrack_zone zone;
+	struct nf_conn_help *help;
 	struct nf_conn *ct;
 	int ret = -EOPNOTSUPP;
 
 	if (info->flags & XT_CT_NOTRACK) {
-		ct = nf_ct_untracked_get();
-		atomic_inc(&ct->ct_general.use);
+		ct = NULL;
 		goto out;
 	}
 
 #ifndef CONFIG_NF_CONNTRACK_ZONES
-	if (info->zone)
+	if (info->zone || info->flags & (XT_CT_ZONE_DIR_ORIG |
+					 XT_CT_ZONE_DIR_REPL |
+					 XT_CT_ZONE_MARK))
 		goto err1;
 #endif
 
@@ -200,17 +223,25 @@ static int xt_ct_tg_check(const struct xt_tgchk_param *par,
 	if (ret < 0)
 		goto err1;
 
-	memset(&t, 0, sizeof(t));
-	ct = nf_conntrack_alloc(par->net, info->zone, &t, &t, GFP_KERNEL);
-	ret = PTR_ERR(ct);
-	if (IS_ERR(ct))
+	memset(&zone, 0, sizeof(zone));
+	zone.id = info->zone;
+	zone.dir = xt_ct_flags_to_dir(info);
+	if (info->flags & XT_CT_ZONE_MARK)
+		zone.flags |= NF_CT_FLAG_MARK;
+
+	ct = nf_ct_tmpl_alloc(par->net, &zone, GFP_KERNEL);
+	if (!ct) {
+		ret = -ENOMEM;
 		goto err2;
+	}
 
 	ret = 0;
 	if ((info->ct_events || info->exp_events) &&
 	    !nf_ct_ecache_ext_add(ct, info->ct_events, info->exp_events,
-				  GFP_KERNEL))
+				  GFP_KERNEL)) {
+		ret = -EINVAL;
 		goto err3;
+	}
 
 	if (info->helper[0]) {
 		ret = xt_ct_set_helper(ct, info->helper, par);
@@ -221,21 +252,20 @@ static int xt_ct_tg_check(const struct xt_tgchk_param *par,
 	if (info->timeout[0]) {
 		ret = xt_ct_set_timeout(ct, par, info->timeout);
 		if (ret < 0)
-			goto err3;
+			goto err4;
 	}
-
-	__set_bit(IPS_TEMPLATE_BIT, &ct->status);
 	__set_bit(IPS_CONFIRMED_BIT, &ct->status);
-
-	/* Overload tuple linked list to put us in template list. */
-	hlist_nulls_add_head_rcu(&ct->tuplehash[IP_CT_DIR_ORIGINAL].hnnode,
-				 &par->net->ct.tmpl);
+	nf_conntrack_get(&ct->ct_general);
 out:
 	info->ct = ct;
 	return 0;
 
+err4:
+	help = nfct_help(ct);
+	if (help)
+		module_put(help->helper->me);
 err3:
-	nf_conntrack_free(ct);
+	nf_ct_tmpl_free(ct);
 err2:
 	nf_ct_l3proto_module_put(par->family);
 err1:
@@ -298,8 +328,10 @@ static void xt_ct_destroy_timeout(struct nf_conn *ct)
 
 	if (timeout_put) {
 		timeout_ext = nf_ct_timeout_find(ct);
-		if (timeout_ext)
+		if (timeout_ext) {
 			timeout_put(timeout_ext->timeout);
+			RCU_INIT_POINTER(timeout_ext->timeout, NULL);
+		}
 	}
 	rcu_read_unlock();
 #endif
@@ -311,7 +343,7 @@ static void xt_ct_tg_destroy(const struct xt_tgdtor_param *par,
 	struct nf_conn *ct = info->ct;
 	struct nf_conn_help *help;
 
-	if (!nf_ct_is_untracked(ct)) {
+	if (ct && !nf_ct_is_untracked(ct)) {
 		help = nfct_help(ct);
 		if (help)
 			module_put(help->helper->me);
@@ -319,8 +351,8 @@ static void xt_ct_tg_destroy(const struct xt_tgdtor_param *par,
 		nf_ct_l3proto_module_put(par->family);
 
 		xt_ct_destroy_timeout(ct);
+		nf_ct_put(info->ct);
 	}
-	nf_ct_put(info->ct);
 }
 
 static void xt_ct_tg_destroy_v0(const struct xt_tgdtor_param *par)
@@ -348,6 +380,7 @@ static struct xt_target xt_ct_tg_reg[] __read_mostly = {
 		.name		= "CT",
 		.family		= NFPROTO_UNSPEC,
 		.targetsize	= sizeof(struct xt_ct_target_info),
+		.usersize	= offsetof(struct xt_ct_target_info, ct),
 		.checkentry	= xt_ct_tg_check_v0,
 		.destroy	= xt_ct_tg_destroy_v0,
 		.target		= xt_ct_target_v0,
@@ -359,6 +392,7 @@ static struct xt_target xt_ct_tg_reg[] __read_mostly = {
 		.family		= NFPROTO_UNSPEC,
 		.revision	= 1,
 		.targetsize	= sizeof(struct xt_ct_target_info_v1),
+		.usersize	= offsetof(struct xt_ct_target_info, ct),
 		.checkentry	= xt_ct_tg_check_v1,
 		.destroy	= xt_ct_tg_destroy_v1,
 		.target		= xt_ct_target_v1,
@@ -370,6 +404,7 @@ static struct xt_target xt_ct_tg_reg[] __read_mostly = {
 		.family		= NFPROTO_UNSPEC,
 		.revision	= 2,
 		.targetsize	= sizeof(struct xt_ct_target_info_v1),
+		.usersize	= offsetof(struct xt_ct_target_info, ct),
 		.checkentry	= xt_ct_tg_check_v2,
 		.destroy	= xt_ct_tg_destroy_v1,
 		.target		= xt_ct_target_v1,

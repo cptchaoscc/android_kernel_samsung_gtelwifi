@@ -24,8 +24,6 @@
 #include <linux/timer.h>
 #include <linux/mod_devicetable.h>
 
-#define KEY_RECENT              254
-
 /**
  * struct input_value - input value representation
  * @type: type of value (EV_KEY, EV_ABS, etc)
@@ -41,8 +39,6 @@ struct input_value {
 /**
  * struct input_dev - represents an input device
  * @name: name of the device
- * @device_node_name: name of the device node (must be unique). Used to set name 
- *  instead of number
  * @phys: physical path to the device in the system hierarchy
  * @uniq: unique identification code for the device (if device has it)
  * @id: id of the device (struct input_id)
@@ -124,7 +120,6 @@ struct input_value {
  */
 struct input_dev {
 	const char *name;
-	const char *device_node_name;
 	const char *phys;
 	const char *uniq;
 	struct input_id id;
@@ -474,6 +469,8 @@ int input_get_keycode(struct input_dev *dev, struct input_keymap_entry *ke);
 int input_set_keycode(struct input_dev *dev,
 		      const struct input_keymap_entry *ke);
 
+void input_enable_softrepeat(struct input_dev *dev, int delay, int period);
+
 extern struct class input_class;
 
 /**
@@ -532,6 +529,7 @@ int input_ff_event(struct input_dev *dev, unsigned int type, unsigned int code, 
 
 int input_ff_upload(struct input_dev *dev, struct ff_effect *effect, struct file *file);
 int input_ff_erase(struct input_dev *dev, int effect_id, struct file *file);
+int input_ff_flush(struct input_dev *dev, struct file *file);
 
 int input_ff_create_memless(struct input_dev *dev, void *data,
 		int (*play_effect)(struct input_dev *, void *, struct ff_effect *));

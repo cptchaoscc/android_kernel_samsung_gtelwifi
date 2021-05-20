@@ -301,6 +301,9 @@ static ssize_t qib_portattr_show(struct kobject *kobj,
 	struct qib_pportdata *ppd =
 		container_of(kobj, struct qib_pportdata, pport_kobj);
 
+	if (!pattr->show)
+		return -EIO;
+
 	return pattr->show(ppd, buf);
 }
 
@@ -311,6 +314,9 @@ static ssize_t qib_portattr_store(struct kobject *kobj,
 		container_of(attr, struct qib_port_attr, attr);
 	struct qib_pportdata *ppd =
 		container_of(kobj, struct qib_pportdata, pport_kobj);
+
+	if (!pattr->store)
+		return -EIO;
 
 	return pattr->store(ppd, buf, len);
 }
@@ -586,8 +592,8 @@ static ssize_t show_serial(struct device *device,
 		container_of(device, struct qib_ibdev, ibdev.dev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
-	buf[sizeof dd->serial] = '\0';
-	memcpy(buf, dd->serial, sizeof dd->serial);
+	buf[sizeof(dd->serial)] = '\0';
+	memcpy(buf, dd->serial, sizeof(dd->serial));
 	strcat(buf, "\n");
 	return strlen(buf);
 }
@@ -609,28 +615,6 @@ static ssize_t store_chip_reset(struct device *device,
 	ret = qib_reset_device(dd->unit);
 bail:
 	return ret < 0 ? ret : count;
-}
-
-static ssize_t show_logged_errs(struct device *device,
-				struct device_attribute *attr, char *buf)
-{
-	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, ibdev.dev);
-	struct qib_devdata *dd = dd_from_dev(dev);
-	int idx, count;
-
-	/* force consistency with actual EEPROM */
-	if (qib_update_eeprom_log(dd) != 0)
-		return -ENXIO;
-
-	count = 0;
-	for (idx = 0; idx < QIB_EEP_LOG_CNT; ++idx) {
-		count += scnprintf(buf + count, PAGE_SIZE - count, "%d%c",
-				   dd->eep_st_errs[idx],
-				   idx == (QIB_EEP_LOG_CNT - 1) ? '\n' : ' ');
-	}
-
-	return count;
 }
 
 /*
@@ -679,7 +663,6 @@ static DEVICE_ATTR(nctxts, S_IRUGO, show_nctxts, NULL);
 static DEVICE_ATTR(nfreectxts, S_IRUGO, show_nfreectxts, NULL);
 static DEVICE_ATTR(serial, S_IRUGO, show_serial, NULL);
 static DEVICE_ATTR(boardversion, S_IRUGO, show_boardversion, NULL);
-static DEVICE_ATTR(logged_errors, S_IRUGO, show_logged_errs, NULL);
 static DEVICE_ATTR(tempsense, S_IRUGO, show_tempsense, NULL);
 static DEVICE_ATTR(localbus_info, S_IRUGO, show_localbus_info, NULL);
 static DEVICE_ATTR(chip_reset, S_IWUSR, NULL, store_chip_reset);
@@ -693,7 +676,6 @@ static struct device_attribute *qib_attributes[] = {
 	&dev_attr_nfreectxts,
 	&dev_attr_serial,
 	&dev_attr_boardversion,
-	&dev_attr_logged_errors,
 	&dev_attr_tempsense,
 	&dev_attr_localbus_info,
 	&dev_attr_chip_reset,
@@ -721,7 +703,7 @@ int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 		qib_dev_err(dd,
 			"Skipping linkcontrol sysfs info, (err %d) port %u\n",
 			ret, port_num);
-		goto bail;
+		goto bail_link;
 	}
 	kobject_uevent(&ppd->pport_kobj, KOBJ_ADD);
 
@@ -731,7 +713,7 @@ int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 		qib_dev_err(dd,
 			"Skipping sl2vl sysfs info, (err %d) port %u\n",
 			ret, port_num);
-		goto bail_link;
+		goto bail_sl;
 	}
 	kobject_uevent(&ppd->sl2vl_kobj, KOBJ_ADD);
 
@@ -741,7 +723,7 @@ int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 		qib_dev_err(dd,
 			"Skipping diag_counters sysfs info, (err %d) port %u\n",
 			ret, port_num);
-		goto bail_sl;
+		goto bail_diagc;
 	}
 	kobject_uevent(&ppd->diagc_kobj, KOBJ_ADD);
 
@@ -754,7 +736,7 @@ int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 		qib_dev_err(dd,
 		 "Skipping Congestion Control sysfs info, (err %d) port %u\n",
 		 ret, port_num);
-		goto bail_diagc;
+		goto bail_cc;
 	}
 
 	kobject_uevent(&ppd->pport_cc_kobj, KOBJ_ADD);
@@ -836,6 +818,7 @@ void qib_verbs_unregister_sysfs(struct qib_devdata *dd)
 				&cc_table_bin_attr);
 			kobject_put(&ppd->pport_cc_kobj);
 		}
+		kobject_put(&ppd->diagc_kobj);
 		kobject_put(&ppd->sl2vl_kobj);
 		kobject_put(&ppd->pport_kobj);
 	}

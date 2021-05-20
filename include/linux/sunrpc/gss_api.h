@@ -81,6 +81,7 @@ struct pf_desc {
 	u32	service;
 	char	*name;
 	char	*auth_domain_name;
+	struct auth_domain *domain;
 };
 
 /* Different mechanisms (e.g., krb5 or spkm3) may implement gss-api, and
@@ -150,6 +151,8 @@ struct gss_api_mech *gss_mech_get_by_pseudoflavor(u32);
 
 /* Fill in an array with a list of supported pseudoflavors */
 int gss_mech_list_pseudoflavors(rpc_authflavor_t *, int);
+
+struct gss_api_mech * gss_mech_get(struct gss_api_mech *);
 
 /* For every successful gss_mech_get or gss_mech_get_by_* call there must be a
  * corresponding call to gss_mech_put. */

@@ -440,7 +440,7 @@ static void am79c961_timeout(struct net_device *dev)
 /*
  * Transmit a packet
  */
-static int
+static netdev_tx_t
 am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dev_priv *priv = netdev_priv(dev);
@@ -472,7 +472,7 @@ am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 	if (am_readword(dev, priv->txhdr + (priv->txhead << 3) + 2) & TMD_OWN)
 		netif_stop_queue(dev);
 
-	dev_kfree_skb(skb);
+	dev_consume_skb_any(skb);
 
 	return NETDEV_TX_OK;
 }

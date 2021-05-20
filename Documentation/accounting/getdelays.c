@@ -135,7 +135,7 @@ static int send_cmd(int sd, __u16 nlmsg_type, __u32 nlmsg_pid,
 	msg.g.version = 0x1;
 	na = (struct nlattr *) GENLMSG_DATA(&msg);
 	na->nla_type = nla_type;
-	na->nla_len = nla_len + 1 + NLA_HDRLEN;
+	na->nla_len = nla_len + NLA_HDRLEN;
 	memcpy(NLA_DATA(na), nla_data, nla_len);
 	msg.n.nlmsg_len += NLMSG_ALIGN(na->nla_len);
 
@@ -272,7 +272,7 @@ int main(int argc, char *argv[])
 	char *logfile = NULL;
 	int loop = 0;
 	int containerset = 0;
-	char containerpath[1024];
+	char *containerpath = NULL;
 	int cfd = 0;
 	int forking = 0;
 	sigset_t sigset;
@@ -299,7 +299,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'C':
 			containerset = 1;
-			strncpy(containerpath, optarg, strlen(optarg) + 1);
+			containerpath = optarg;
 			break;
 		case 'w':
 			logfile = strdup(optarg);
@@ -314,6 +314,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'm':
 			strncpy(cpumask, optarg, sizeof(cpumask));
+			cpumask[sizeof(cpumask) - 1] = '\0';
 			maskset = 1;
 			printf("cpumask %s maskset %d\n", cpumask, maskset);
 			break;

@@ -24,6 +24,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/completion.h>
 #include "internal.h"
 
 LIST_HEAD(crypto_alg_list);
@@ -172,7 +173,7 @@ static struct crypto_alg *crypto_larval_wait(struct crypto_alg *alg)
 	struct crypto_larval *larval = (void *)alg;
 	long timeout;
 
-	timeout = wait_for_completion_interruptible_timeout(
+	timeout = wait_for_completion_killable_timeout(
 		&larval->completion, 60 * HZ);
 
 	alg = larval->adult;
@@ -216,11 +217,11 @@ struct crypto_alg *crypto_larval_lookup(const char *name, u32 type, u32 mask)
 
 	alg = crypto_alg_lookup(name, type, mask);
 	if (!alg) {
-		request_module("%s", name);
+		request_module("crypto-%s", name);
 
 		if (!((type ^ CRYPTO_ALG_NEED_FALLBACK) & mask &
 		      CRYPTO_ALG_NEED_FALLBACK))
-			request_module("%s-all", name);
+			request_module("crypto-%s-all", name);
 
 		alg = crypto_alg_lookup(name, type, mask);
 	}
@@ -256,6 +257,16 @@ struct crypto_alg *crypto_alg_mod_lookup(const char *name, u32 type, u32 mask)
 		type |= CRYPTO_ALG_TESTED;
 		mask |= CRYPTO_ALG_TESTED;
 	}
+
+	/*
+	 * If the internal flag is set for a cipher, require a caller to
+	 * to invoke the cipher with the internal flag to use that cipher.
+	 * Also, if a caller wants to allocate a cipher that may or may
+	 * not be an internal cipher, use type | CRYPTO_ALG_INTERNAL and
+	 * !(mask & CRYPTO_ALG_INTERNAL).
+	 */
+	if (!((type | mask) & CRYPTO_ALG_INTERNAL))
+		mask |= CRYPTO_ALG_INTERNAL;
 
 	larval = crypto_larval_lookup(name, type, mask);
 	if (IS_ERR(larval) || !crypto_is_larval(larval))
@@ -345,13 +356,12 @@ static unsigned int crypto_ctxsize(struct crypto_alg *alg, u32 type, u32 mask)
 	return len;
 }
 
-void crypto_shoot_alg(struct crypto_alg *alg)
+static void crypto_shoot_alg(struct crypto_alg *alg)
 {
 	down_write(&crypto_alg_sem);
 	alg->cra_flags |= CRYPTO_ALG_DYING;
 	up_write(&crypto_alg_sem);
 }
-EXPORT_SYMBOL_GPL(crypto_shoot_alg);
 
 struct crypto_tfm *__crypto_alloc_tfm(struct crypto_alg *alg, u32 type,
 				      u32 mask)
@@ -396,7 +406,7 @@ EXPORT_SYMBOL_GPL(__crypto_alloc_tfm);
  *	@mask: Mask for type comparison
  *
  *	This function should not be used by new algorithm types.
- *	Plesae use crypto_alloc_tfm instead.
+ *	Please use crypto_alloc_tfm instead.
  *
  *	crypto_alloc_base() will first attempt to locate an already loaded
  *	algorithm.  If that fails and the kernel supports dynamically loadable
@@ -435,7 +445,7 @@ struct crypto_tfm *crypto_alloc_base(const char *alg_name, u32 type, u32 mask)
 err:
 		if (err != -EAGAIN)
 			break;
-		if (signal_pending(current)) {
+		if (fatal_signal_pending(current)) {
 			err = -EINTR;
 			break;
 		}
@@ -552,7 +562,7 @@ void *crypto_alloc_tfm(const char *alg_name,
 err:
 		if (err != -EAGAIN)
 			break;
-		if (signal_pending(current)) {
+		if (fatal_signal_pending(current)) {
 			err = -EINTR;
 			break;
 		}
@@ -600,6 +610,18 @@ int crypto_has_alg(const char *name, u32 type, u32 mask)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_has_alg);
+
+void crypto_req_done(struct crypto_async_request *req, int err)
+{
+	struct crypto_wait *wait = req->data;
+
+	if (err == -EINPROGRESS)
+		return;
+
+	wait->err = err;
+	complete(&wait->completion);
+}
+EXPORT_SYMBOL_GPL(crypto_req_done);
 
 MODULE_DESCRIPTION("Cryptographic core API");
 MODULE_LICENSE("GPL");

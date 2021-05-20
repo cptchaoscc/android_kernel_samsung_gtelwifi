@@ -1834,7 +1834,7 @@ static void lpphy_papd_cal(struct b43_wldev *dev, struct lpphy_tx_gains gains,
 static void lpphy_papd_cal_txpwr(struct b43_wldev *dev)
 {
 	struct b43_phy_lp *lpphy = dev->phy.lp;
-	struct lpphy_tx_gains gains, oldgains;
+	struct lpphy_tx_gains oldgains;
 	int old_txpctl, old_afe_ovr, old_rf, old_bbmult;
 
 	lpphy_read_tx_pctl_mode_from_hardware(dev);
@@ -1848,9 +1848,9 @@ static void lpphy_papd_cal_txpwr(struct b43_wldev *dev)
 	lpphy_set_tx_power_control(dev, B43_LPPHY_TXPCTL_OFF);
 
 	if (dev->dev->chip_id == 0x4325 && dev->dev->chip_rev == 0)
-		lpphy_papd_cal(dev, gains, 0, 1, 30);
+		lpphy_papd_cal(dev, oldgains, 0, 1, 30);
 	else
-		lpphy_papd_cal(dev, gains, 0, 1, 65);
+		lpphy_papd_cal(dev, oldgains, 0, 1, 65);
 
 	if (old_afe_ovr)
 		lpphy_set_tx_gains(dev, oldgains);
@@ -1985,22 +1985,10 @@ static void lpphy_calibration(struct b43_wldev *dev)
 	b43_mac_enable(dev);
 }
 
-static u16 b43_lpphy_op_read(struct b43_wldev *dev, u16 reg)
-{
-	b43_write16(dev, B43_MMIO_PHY_CONTROL, reg);
-	return b43_read16(dev, B43_MMIO_PHY_DATA);
-}
-
-static void b43_lpphy_op_write(struct b43_wldev *dev, u16 reg, u16 value)
-{
-	b43_write16(dev, B43_MMIO_PHY_CONTROL, reg);
-	b43_write16(dev, B43_MMIO_PHY_DATA, value);
-}
-
 static void b43_lpphy_op_maskset(struct b43_wldev *dev, u16 reg, u16 mask,
 				 u16 set)
 {
-	b43_write16(dev, B43_MMIO_PHY_CONTROL, reg);
+	b43_write16f(dev, B43_MMIO_PHY_CONTROL, reg);
 	b43_write16(dev, B43_MMIO_PHY_DATA,
 		    (b43_read16(dev, B43_MMIO_PHY_DATA) & mask) | set);
 }
@@ -2016,7 +2004,7 @@ static u16 b43_lpphy_op_radio_read(struct b43_wldev *dev, u16 reg)
 	} else
 		reg |= 0x200;
 
-	b43_write16(dev, B43_MMIO_RADIO_CONTROL, reg);
+	b43_write16f(dev, B43_MMIO_RADIO_CONTROL, reg);
 	return b43_read16(dev, B43_MMIO_RADIO_DATA_LOW);
 }
 
@@ -2025,7 +2013,7 @@ static void b43_lpphy_op_radio_write(struct b43_wldev *dev, u16 reg, u16 value)
 	/* Register 1 is a 32-bit register. */
 	B43_WARN_ON(reg == 1);
 
-	b43_write16(dev, B43_MMIO_RADIO_CONTROL, reg);
+	b43_write16f(dev, B43_MMIO_RADIO_CONTROL, reg);
 	b43_write16(dev, B43_MMIO_RADIO_DATA_LOW, value);
 }
 
@@ -2713,8 +2701,6 @@ const struct b43_phy_operations b43_phyops_lp = {
 	.free			= b43_lpphy_op_free,
 	.prepare_structs	= b43_lpphy_op_prepare_structs,
 	.init			= b43_lpphy_op_init,
-	.phy_read		= b43_lpphy_op_read,
-	.phy_write		= b43_lpphy_op_write,
 	.phy_maskset		= b43_lpphy_op_maskset,
 	.radio_read		= b43_lpphy_op_radio_read,
 	.radio_write		= b43_lpphy_op_radio_write,

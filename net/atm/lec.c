@@ -41,6 +41,9 @@ static unsigned char bridge_ula_lec[] = { 0x01, 0x80, 0xc2, 0x00, 0x00 };
 #include <linux/module.h>
 #include <linux/init.h>
 
+/* Hardening for Spectre-v1 */
+#include <linux/nospec.h>
+
 #include "lec.h"
 #include "lec_arpc.h"
 #include "resources.h"
@@ -152,7 +155,7 @@ static void lec_handle_bridge(struct sk_buff *skb, struct net_device *dev)
 		atm_force_charge(priv->lecd, skb2->truesize);
 		sk = sk_atm(priv->lecd);
 		skb_queue_tail(&sk->sk_receive_queue, skb2);
-		sk->sk_data_ready(sk, skb2->len);
+		sk->sk_data_ready(sk);
 	}
 }
 #endif /* defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE) */
@@ -410,9 +413,11 @@ static int lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
 		priv->lane2_ops = NULL;
 		if (priv->lane_version > 1)
 			priv->lane2_ops = &lane2_ops;
+		rtnl_lock();
 		if (dev_set_mtu(dev, mesg->content.config.mtu))
 			pr_info("%s: change_mtu to %d failed\n",
 				dev->name, mesg->content.config.mtu);
+		rtnl_unlock();
 		priv->is_proxy = mesg->content.config.is_proxy;
 		break;
 	case l_flush_tran_id:
@@ -447,7 +452,7 @@ static int lec_atm_send(struct atm_vcc *vcc, struct sk_buff *skb)
 			atm_force_charge(priv->lecd, skb2->truesize);
 			sk = sk_atm(priv->lecd);
 			skb_queue_tail(&sk->sk_receive_queue, skb2);
-			sk->sk_data_ready(sk, skb2->len);
+			sk->sk_data_ready(sk);
 		}
 	}
 #endif /* defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE) */
@@ -521,7 +526,7 @@ send_to_lecd(struct lec_priv *priv, atmlec_msg_type type,
 	if (data != NULL)
 		mesg->sizeoftlvs = data->len;
 	if (mac_addr)
-		memcpy(&mesg->content.normal.mac_addr, mac_addr, ETH_ALEN);
+		ether_addr_copy(mesg->content.normal.mac_addr, mac_addr);
 	else
 		mesg->content.normal.targetless_le_arp = 1;
 	if (atm_addr)
@@ -530,13 +535,13 @@ send_to_lecd(struct lec_priv *priv, atmlec_msg_type type,
 	atm_force_charge(priv->lecd, skb->truesize);
 	sk = sk_atm(priv->lecd);
 	skb_queue_tail(&sk->sk_receive_queue, skb);
-	sk->sk_data_ready(sk, skb->len);
+	sk->sk_data_ready(sk);
 
 	if (data != NULL) {
 		pr_debug("about to send %d bytes of data\n", data->len);
 		atm_force_charge(priv->lecd, data->truesize);
 		skb_queue_tail(&sk->sk_receive_queue, data);
-		sk->sk_data_ready(sk, skb->len);
+		sk->sk_data_ready(sk);
 	}
 
 	return 0;
@@ -616,7 +621,7 @@ static void lec_push(struct atm_vcc *vcc, struct sk_buff *skb)
 
 		pr_debug("%s: To daemon\n", dev->name);
 		skb_queue_tail(&sk->sk_receive_queue, skb);
-		sk->sk_data_ready(sk, skb->len);
+		sk->sk_data_ready(sk);
 	} else {		/* Data frame, queue to protocol handlers */
 		struct lec_arp_table *entry;
 		unsigned char *src, *dst;
@@ -695,8 +700,10 @@ static int lec_vcc_attach(struct atm_vcc *vcc, void __user *arg)
 	bytes_left = copy_from_user(&ioc_data, arg, sizeof(struct atmlec_ioc));
 	if (bytes_left != 0)
 		pr_info("copy from user failed for %d bytes\n", bytes_left);
-	if (ioc_data.dev_num < 0 || ioc_data.dev_num >= MAX_LEC_ITF ||
-	    !dev_lec[ioc_data.dev_num])
+	if (ioc_data.dev_num < 0 || ioc_data.dev_num >= MAX_LEC_ITF)
+		return -EINVAL;
+	ioc_data.dev_num = array_index_nospec(ioc_data.dev_num, MAX_LEC_ITF);
+	if (!dev_lec[ioc_data.dev_num])
 		return -EINVAL;
 	vpriv = kmalloc(sizeof(struct lec_vcc_priv), GFP_KERNEL);
 	if (!vpriv)
@@ -714,7 +721,10 @@ static int lec_vcc_attach(struct atm_vcc *vcc, void __user *arg)
 
 static int lec_mcast_attach(struct atm_vcc *vcc, int arg)
 {
-	if (arg < 0 || arg >= MAX_LEC_ITF || !dev_lec[arg])
+	if (arg < 0 || arg >= MAX_LEC_ITF)
+		return -EINVAL;
+	arg = array_index_nospec(arg, MAX_LEC_ITF);
+	if (!dev_lec[arg])
 		return -EINVAL;
 	vcc->proto_data = dev_lec[arg];
 	return lec_mcast_make(netdev_priv(dev_lec[arg]), vcc);
@@ -732,6 +742,7 @@ static int lecd_attach(struct atm_vcc *vcc, int arg)
 		i = arg;
 	if (arg >= MAX_LEC_ITF)
 		return -EINVAL;
+	i = array_index_nospec(arg, MAX_LEC_ITF);
 	if (!dev_lec[i]) {
 		int size;
 
@@ -833,7 +844,6 @@ static void *lec_tbl_walk(struct lec_state *state, struct hlist_head *tbl,
 			  loff_t *l)
 {
 	struct hlist_node *e = state->node;
-	struct lec_arp_table *tmp;
 
 	if (!e)
 		e = tbl->first;
@@ -842,9 +852,7 @@ static void *lec_tbl_walk(struct lec_state *state, struct hlist_head *tbl,
 		--*l;
 	}
 
-	tmp = container_of(e, struct lec_arp_table, next);
-
-	hlist_for_each_entry_from(tmp, next) {
+	for (; e; e = e->next) {
 		if (--*l < 0)
 			break;
 	}
@@ -1282,6 +1290,12 @@ static void lec_arp_clear_vccs(struct lec_arp_table *entry)
 		entry->vcc = NULL;
 	}
 	if (entry->recv_vcc) {
+		struct atm_vcc *vcc = entry->recv_vcc;
+		struct lec_vcc_priv *vpriv = LEC_VCC_PRIV(vcc);
+
+		kfree(vpriv);
+		vcc->user_back = NULL;
+
 		entry->recv_vcc->push = entry->old_recv_push;
 		vcc_release_async(entry->recv_vcc, -EPIPE);
 		entry->recv_vcc = NULL;
@@ -1565,7 +1579,7 @@ static struct lec_arp_table *make_entry(struct lec_priv *priv,
 		pr_info("LEC: Arp entry kmalloc failed\n");
 		return NULL;
 	}
-	memcpy(to_return->mac_addr, mac_addr, ETH_ALEN);
+	ether_addr_copy(to_return->mac_addr, mac_addr);
 	INIT_HLIST_NODE(&to_return->next);
 	setup_timer(&to_return->timer, lec_arp_expire_arp,
 			(unsigned long)to_return);
@@ -1887,7 +1901,8 @@ lec_arp_update(struct lec_priv *priv, const unsigned char *mac_addr,
 					entry = tmp;
 				} else {
 					entry->status = ESI_FORWARD_DIRECT;
-					memcpy(entry->mac_addr, mac_addr, ETH_ALEN);
+					ether_addr_copy(entry->mac_addr,
+							mac_addr);
 					entry->last_used = jiffies;
 					lec_arp_add(priv, entry);
 				}
@@ -2001,7 +2016,7 @@ lec_vcc_added(struct lec_priv *priv, const struct atmlec_ioc *ioc_data,
 		if (entry == NULL)
 			goto out;
 		memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
-		memset(entry->mac_addr, 0, ETH_ALEN);
+		eth_zero_addr(entry->mac_addr);
 		entry->recv_vcc = vcc;
 		entry->old_recv_push = old_push;
 		entry->status = ESI_UNKNOWN;
@@ -2086,7 +2101,7 @@ lec_vcc_added(struct lec_priv *priv, const struct atmlec_ioc *ioc_data,
 	entry->vcc = vcc;
 	entry->old_push = old_push;
 	memcpy(entry->atm_addr, ioc_data->atm_addr, ATM_ESA_LEN);
-	memset(entry->mac_addr, 0, ETH_ALEN);
+	eth_zero_addr(entry->mac_addr);
 	entry->status = ESI_UNKNOWN;
 	hlist_add_head(&entry->next, &priv->lec_arp_empty_ones);
 	entry->timer.expires = jiffies + priv->vcc_timeout_period;
@@ -2263,7 +2278,7 @@ lec_arp_check_empties(struct lec_priv *priv,
 				  &priv->lec_arp_empty_ones, next) {
 		if (vcc == entry->vcc) {
 			del_timer(&entry->timer);
-			memcpy(entry->mac_addr, src, ETH_ALEN);
+			ether_addr_copy(entry->mac_addr, src);
 			entry->status = ESI_FORWARD_DIRECT;
 			entry->last_used = jiffies;
 			/* We might have got an entry */

@@ -35,18 +35,21 @@ static int ir_lirc_decode(struct rc_dev *dev, struct ir_raw_event ev)
 	struct lirc_codec *lirc = &dev->raw->lirc;
 	int sample;
 
-	if (!(dev->enabled_protocols & RC_BIT_LIRC))
-		return 0;
-
 	if (!dev->raw->lirc.drv || !dev->raw->lirc.drv->rbuf)
 		return -EINVAL;
 
 	/* Packet start */
-	if (ev.reset)
-		return 0;
+	if (ev.reset) {
+		/* Userspace expects a long space event before the start of
+		 * the signal to use as a sync.  This may be done with repeat
+		 * packets and normal samples.  But if a reset has been sent
+		 * then we assume that a long time has passed, so we send a
+		 * space with the maximum time value. */
+		sample = LIRC_SPACE(LIRC_VALUE_MASK);
+		IR_dprintk(2, "delivering reset sync space to lirc_dev\n");
 
 	/* Carrier reports */
-	if (ev.carrier_report) {
+	} else if (ev.carrier_report) {
 		sample = LIRC_FREQUENCY(ev.carrier);
 		IR_dprintk(2, "carrier report (freq: %d)\n", sample);
 
@@ -140,11 +143,20 @@ static ssize_t ir_lirc_transmit_ir(struct file *file, const char __user *buf,
 		goto out;
 	}
 
+	for (i = 0; i < count; i++) {
+		if (txbuf[i] > IR_MAX_DURATION / 1000 - duration || !txbuf[i]) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		duration += txbuf[i];
+	}
+
 	ret = dev->tx_ir(dev, txbuf, count);
 	if (ret < 0)
 		goto out;
 
-	for (i = 0; i < ret; i++)
+	for (duration = i = 0; i < ret; i++)
 		duration += txbuf[i];
 
 	ret *= sizeof(unsigned int);
@@ -242,7 +254,7 @@ static long ir_lirc_ioctl(struct file *filep, unsigned int cmd,
 		return 0;
 
 	case LIRC_GET_REC_RESOLUTION:
-		val = dev->rx_resolution;
+		val = dev->rx_resolution / 1000;
 		break;
 
 	case LIRC_SET_WIDEBAND_RECEIVER:
@@ -274,11 +286,14 @@ static long ir_lirc_ioctl(struct file *filep, unsigned int cmd,
 		if (!dev->max_timeout)
 			return -ENOSYS;
 
+		/* Check for multiply overflow */
+		if (val > U32_MAX / 1000)
+			return -EINVAL;
+
 		tmp = val * 1000;
 
-		if (tmp < dev->min_timeout ||
-		    tmp > dev->max_timeout)
-				return -EINVAL;
+		if (tmp < dev->min_timeout || tmp > dev->max_timeout)
+			return -EINVAL;
 
 		dev->timeout = tmp;
 		break;
@@ -375,6 +390,7 @@ static int ir_lirc_register(struct rc_dev *dev)
 	drv->code_length = sizeof(struct ir_raw_event) * 8;
 	drv->fops = &lirc_fops;
 	drv->dev = &dev->dev;
+	drv->rdev = dev;
 	drv->owner = THIS_MODULE;
 
 	drv->minor = lirc_register_driver(drv);
@@ -408,7 +424,7 @@ static int ir_lirc_unregister(struct rc_dev *dev)
 }
 
 static struct ir_raw_handler lirc_handler = {
-	.protocols	= RC_BIT_LIRC,
+	.protocols	= 0,
 	.decode		= ir_lirc_decode,
 	.raw_register	= ir_lirc_register,
 	.raw_unregister	= ir_lirc_unregister,

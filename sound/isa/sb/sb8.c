@@ -102,8 +102,8 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 	struct snd_opl3 *opl3;
 	int err;
 
-	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
-			      sizeof(struct snd_sb8), &card);
+	err = snd_card_new(pdev, index[dev], id[dev], THIS_MODULE,
+			   sizeof(struct snd_sb8), &card);
 	if (err < 0)
 		return err;
 	acard = card->private_data;
@@ -111,6 +111,10 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 
 	/* block the 0x388 port to avoid PnP conflicts */
 	acard->fm_res = request_region(0x388, 4, "SoundBlaster FM");
+	if (!acard->fm_res) {
+		err = -EBUSY;
+		goto _err;
+	}
 
 	if (port[dev] != SNDRV_AUTO_PORT) {
 		if ((err = snd_sbdsp_create(card, port[dev], irq[dev],
@@ -157,7 +161,7 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 		goto _err;
 	}
 
-	if ((err = snd_sb8dsp_pcm(chip, 0, NULL)) < 0)
+	if ((err = snd_sb8dsp_pcm(chip, 0)) < 0)
 		goto _err;
 
 	if ((err = snd_sbmixer_new(chip)) < 0)
@@ -182,7 +186,7 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 			goto _err;
 	}
 
-	if ((err = snd_sb8dsp_midi(chip, 0, NULL)) < 0)
+	if ((err = snd_sb8dsp_midi(chip, 0)) < 0)
 		goto _err;
 
 	strcpy(card->driver, chip->hardware == SB_HW_PRO ? "SB Pro" : "SB8");
@@ -191,8 +195,6 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 		chip->name,
 		chip->port,
 		irq[dev], dma8[dev]);
-
-	snd_card_set_dev(card, pdev);
 
 	if ((err = snd_card_register(card)) < 0)
 		goto _err;
@@ -208,7 +210,6 @@ static int snd_sb8_probe(struct device *pdev, unsigned int dev)
 static int snd_sb8_remove(struct device *pdev, unsigned int dev)
 {
 	snd_card_free(dev_get_drvdata(pdev));
-	dev_set_drvdata(pdev, NULL);
 	return 0;
 }
 

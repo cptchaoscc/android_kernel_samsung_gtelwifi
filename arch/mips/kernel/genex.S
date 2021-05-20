@@ -21,20 +21,6 @@
 #include <asm/war.h>
 #include <asm/thread_info.h>
 
-#ifdef CONFIG_MIPS_MT_SMTC
-#define PANIC_PIC(msg)					\
-		.set	push;				\
-		.set	nomicromips;			\
-		.set	reorder;			\
-		PTR_LA	a0,8f;				\
-		.set	noat;				\
-		PTR_LA	AT, panic;			\
-		jr	AT;				\
-9:		b	9b;				\
-		.set	pop;				\
-		TEXT(msg)
-#endif
-
 	__INIT
 
 /*
@@ -67,7 +53,7 @@ NESTED(except_vec3_generic, 0, sp)
  */
 NESTED(except_vec3_r4000, 0, sp)
 	.set	push
-	.set	mips3
+	.set	arch=r4000
 	.set	noat
 	mfc0	k1, CP0_CAUSE
 	li	k0, 31<<2
@@ -139,7 +125,7 @@ LEAF(__r4k_wait)
 	nop
 	nop
 #endif
-	.set	mips3
+	.set	MIPS_ISA_ARCH_LEVEL_RAW
 	wait
 	/* end of rollback region (the region size must be power of two) */
 1:
@@ -156,9 +142,8 @@ LEAF(__r4k_wait)
 	PTR_LA	k1, __r4k_wait
 	ori	k0, 0x1f	/* 32 byte rollback region */
 	xori	k0, 0x1f
-	bne	k0, k1, 9f
+	bne	k0, k1, \handler
 	MTC0	k0, CP0_EPC
-9:
 	.set pop
 	.endm
 
@@ -202,9 +187,46 @@ NESTED(handle_int, PT_SIZE, sp)
 
 	LONG_L	s0, TI_REGS($28)
 	LONG_S	sp, TI_REGS($28)
-	PTR_LA	ra, ret_from_irq
-	PTR_LA  v0, plat_irq_dispatch
-	jr	v0
+
+	/*
+	 * SAVE_ALL ensures we are using a valid kernel stack for the thread.
+	 * Check if we are already using the IRQ stack.
+	 */
+	move	s1, sp # Preserve the sp
+
+	/* Get IRQ stack for this CPU */
+	ASM_CPUID_MFC0	k0, ASM_SMP_CPUID_REG
+#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+	lui	k1, %hi(irq_stack)
+#else
+	lui	k1, %highest(irq_stack)
+	daddiu	k1, %higher(irq_stack)
+	dsll	k1, 16
+	daddiu	k1, %hi(irq_stack)
+	dsll	k1, 16
+#endif
+	LONG_SRL	k0, SMP_CPUID_PTRSHIFT
+	LONG_ADDU	k1, k0
+	LONG_L	t0, %lo(irq_stack)(k1)
+
+	# Check if already on IRQ stack
+	PTR_LI	t1, ~(_THREAD_SIZE-1)
+	and	t1, t1, sp
+	beq	t0, t1, 2f
+
+	/* Switch to IRQ stack */
+	li	t1, _IRQ_STACK_START
+	PTR_ADD sp, t0, t1
+
+	/* Save task's sp on IRQ stack so that unwinding can follow it */
+	LONG_S	s1, 0(sp)
+2:
+	jal	plat_irq_dispatch
+
+	/* Restore sp */
+	move	sp, s1
+
+	j	ret_from_irq
 #ifdef CONFIG_CPU_MICROMIPS
 	nop
 #endif
@@ -251,15 +273,6 @@ NESTED(except_vec_vi, 0, sp)
 	SAVE_AT
 	.set	push
 	.set	noreorder
-#ifdef CONFIG_MIPS_MT_SMTC
-	/*
-	 * To keep from blindly blocking *all* interrupts
-	 * during service by SMTC kernel, we also want to
-	 * pass the IM value to be cleared.
-	 */
-FEXPORT(except_vec_vi_mori)
-	ori	a0, $0, 0
-#endif /* CONFIG_MIPS_MT_SMTC */
 	PTR_LA	v1, except_vec_vi_handler
 FEXPORT(except_vec_vi_lui)
 	lui	v0, 0		/* Patched */
@@ -277,44 +290,55 @@ EXPORT(except_vec_vi_end)
 NESTED(except_vec_vi_handler, 0, sp)
 	SAVE_TEMP
 	SAVE_STATIC
-#ifdef CONFIG_MIPS_MT_SMTC
-	/*
-	 * SMTC has an interesting problem that interrupts are level-triggered,
-	 * and the CLI macro will clear EXL, potentially causing a duplicate
-	 * interrupt service invocation. So we need to clear the associated
-	 * IM bit of Status prior to doing CLI, and restore it after the
-	 * service routine has been invoked - we must assume that the
-	 * service routine will have cleared the state, and any active
-	 * level represents a new or otherwised unserviced event...
-	 */
-	mfc0	t1, CP0_STATUS
-	and	t0, a0, t1
-#ifdef CONFIG_MIPS_MT_SMTC_IM_BACKSTOP
-	mfc0	t2, CP0_TCCONTEXT
-	or	t2, t0, t2
-	mtc0	t2, CP0_TCCONTEXT
-#endif /* CONFIG_MIPS_MT_SMTC_IM_BACKSTOP */
-	xor	t1, t1, t0
-	mtc0	t1, CP0_STATUS
-	_ehb
-#endif /* CONFIG_MIPS_MT_SMTC */
 	CLI
 #ifdef CONFIG_TRACE_IRQFLAGS
 	move	s0, v0
-#ifdef CONFIG_MIPS_MT_SMTC
-	move	s1, a0
-#endif
 	TRACE_IRQS_OFF
-#ifdef CONFIG_MIPS_MT_SMTC
-	move	a0, s1
-#endif
 	move	v0, s0
 #endif
 
 	LONG_L	s0, TI_REGS($28)
 	LONG_S	sp, TI_REGS($28)
-	PTR_LA	ra, ret_from_irq
-	jr	v0
+
+	/*
+	 * SAVE_ALL ensures we are using a valid kernel stack for the thread.
+	 * Check if we are already using the IRQ stack.
+	 */
+	move	s1, sp # Preserve the sp
+
+	/* Get IRQ stack for this CPU */
+	ASM_CPUID_MFC0	k0, ASM_SMP_CPUID_REG
+#if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+	lui	k1, %hi(irq_stack)
+#else
+	lui	k1, %highest(irq_stack)
+	daddiu	k1, %higher(irq_stack)
+	dsll	k1, 16
+	daddiu	k1, %hi(irq_stack)
+	dsll	k1, 16
+#endif
+	LONG_SRL	k0, SMP_CPUID_PTRSHIFT
+	LONG_ADDU	k1, k0
+	LONG_L	t0, %lo(irq_stack)(k1)
+
+	# Check if already on IRQ stack
+	PTR_LI	t1, ~(_THREAD_SIZE-1)
+	and	t1, t1, sp
+	beq	t0, t1, 2f
+
+	/* Switch to IRQ stack */
+	li	t1, _IRQ_STACK_START
+	PTR_ADD sp, t0, t1
+
+	/* Save task's sp on IRQ stack so that unwinding can follow it */
+	LONG_S	s1, 0(sp)
+2:
+	jalr	v0
+
+	/* Restore sp */
+	move	sp, s1
+
+	j	ret_from_irq
 	END(except_vec_vi_handler)
 
 /*
@@ -374,12 +398,20 @@ NESTED(except_vec_nmi, 0, sp)
 NESTED(nmi_handler, PT_SIZE, sp)
 	.set	push
 	.set	noat
+	/*
+	 * Clear ERL - restore segment mapping
+	 * Clear BEV - required for page fault exception handler to work
+	 */
+	mfc0	k0, CP0_STATUS
+	ori     k0, k0, ST0_EXL
+	li	k1, ~(ST0_BEV | ST0_ERL)
+	and     k0, k0, k1
+	mtc0    k0, CP0_STATUS
+	_ehb
 	SAVE_ALL
 	move	a0, sp
 	jal	nmi_exception_handler
-	RESTORE_ALL
-	.set	mips3
-	eret
+	/* nmi_exception_handler never returns */
 	.set	pop
 	END(nmi_handler)
 
@@ -397,16 +429,20 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.endm
 
 	.macro	__build_clear_fpe
+	CLI
+	TRACE_IRQS_OFF
 	.set	push
 	/* gas fails to assemble cfc1 for some archs (octeon).*/ \
 	.set	mips1
+	SET_HARDFLOAT
 	cfc1	a1, fcr31
-	li	a2, ~(0x3f << 12)
-	and	a2, a1
-	ctc1	a2, fcr31
 	.set	pop
-	TRACE_IRQS_ON
-	STI
+	.endm
+
+	.macro	__build_clear_msa_fpe
+	CLI
+	TRACE_IRQS_OFF
+	_cfcmsa	a1, MSA_CSR
 	.endm
 
 	.macro	__build_clear_ade
@@ -445,7 +481,7 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.set	noat
 	SAVE_ALL
 	FEXPORT(handle_\exception\ext)
-	__BUILD_clear_\clear
+	__build_clear_\clear
 	.set	at
 	__BUILD_\verbose \exception
 	move	a0, sp
@@ -467,7 +503,10 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	BUILD_HANDLER cpu cpu sti silent		/* #11 */
 	BUILD_HANDLER ov ov sti silent			/* #12 */
 	BUILD_HANDLER tr tr sti silent			/* #13 */
+	BUILD_HANDLER msa_fpe msa_fpe msa_fpe silent	/* #14 */
 	BUILD_HANDLER fpe fpe fpe silent		/* #15 */
+	BUILD_HANDLER ftlb ftlb none silent		/* #16 */
+	BUILD_HANDLER msa msa sti silent		/* #21 */
 	BUILD_HANDLER mdmx mdmx sti silent		/* #22 */
 #ifdef	CONFIG_HARDWARE_WATCHPOINTS
 	/*
@@ -485,9 +524,6 @@ NESTED(nmi_handler, PT_SIZE, sp)
 
 	.align	5
 	LEAF(handle_ri_rdhwr_vivt)
-#ifdef CONFIG_MIPS_MT_SMTC
-	PANIC_PIC("handle_ri_rdhwr_vivt called")
-#else
 	.set	push
 	.set	noat
 	.set	noreorder
@@ -506,7 +542,6 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.set	pop
 	bltz	k1, handle_ri	/* slow path */
 	/* fall thru */
-#endif
 	END(handle_ri_rdhwr_vivt)
 
 	LEAF(handle_ri_rdhwr)
@@ -566,7 +601,7 @@ isrdhwr:
 	ori	k1, _THREAD_MASK
 	xori	k1, _THREAD_MASK
 	LONG_L	v1, TI_TP_VALUE(k1)
-	.set	mips3
+	.set	arch=r4000
 	eret
 	.set	mips0
 #endif

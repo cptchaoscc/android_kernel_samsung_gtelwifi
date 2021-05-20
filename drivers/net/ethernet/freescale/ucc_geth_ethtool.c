@@ -16,7 +16,6 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/stddef.h>
 #include <linux/interrupt.h>
@@ -254,13 +253,11 @@ uec_set_ringparam(struct net_device *netdev,
 		return -EINVAL;
 	}
 
+	if (netif_running(netdev))
+		return -EBUSY;
+
 	ug_info->bdRingLenRx[queue] = ring->rx_pending;
 	ug_info->bdRingLenTx[queue] = ring->tx_pending;
-
-	if (netif_running(netdev)) {
-		/* FIXME: restart automatically */
-		netdev_info(netdev, "Please re-open the interface\n");
-	}
 
 	return ret;
 }
@@ -352,8 +349,6 @@ uec_get_drvinfo(struct net_device *netdev,
 	strlcpy(drvinfo->version, DRV_VERSION, sizeof(drvinfo->version));
 	strlcpy(drvinfo->fw_version, "N/A", sizeof(drvinfo->fw_version));
 	strlcpy(drvinfo->bus_info, "QUICC ENGINE", sizeof(drvinfo->bus_info));
-	drvinfo->eedump_len = 0;
-	drvinfo->regdump_len = uec_get_regs_len(netdev);
 }
 
 #ifdef CONFIG_PM
@@ -418,5 +413,5 @@ static const struct ethtool_ops uec_ethtool_ops = {
 
 void uec_set_ethtool_ops(struct net_device *netdev)
 {
-	SET_ETHTOOL_OPS(netdev, &uec_ethtool_ops);
+	netdev->ethtool_ops = &uec_ethtool_ops;
 }

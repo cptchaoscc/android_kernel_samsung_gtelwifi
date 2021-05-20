@@ -10,6 +10,7 @@
 
 #include <linux/bio.h>
 #include <linux/blkdev.h>
+#include <linux/math64.h>
 #include <linux/ratelimit.h>
 
 struct dm_dev;
@@ -22,7 +23,6 @@ typedef enum { STATUSTYPE_INFO, STATUSTYPE_TABLE } status_type_t;
 
 union map_info {
 	void *ptr;
-	unsigned long long ll;
 };
 
 /*
@@ -48,6 +48,11 @@ typedef void (*dm_dtr_fn) (struct dm_target *ti);
 typedef int (*dm_map_fn) (struct dm_target *ti, struct bio *bio);
 typedef int (*dm_map_request_fn) (struct dm_target *ti, struct request *clone,
 				  union map_info *map_context);
+typedef int (*dm_clone_and_map_request_fn) (struct dm_target *ti,
+					    struct request *rq,
+					    union map_info *map_context,
+					    struct request **clone);
+typedef void (*dm_release_clone_request_fn) (struct request *clone);
 
 /*
  * Returns:
@@ -64,6 +69,7 @@ typedef int (*dm_request_endio_fn) (struct dm_target *ti,
 				    union map_info *map_context);
 
 typedef void (*dm_presuspend_fn) (struct dm_target *ti);
+typedef void (*dm_presuspend_undo_fn) (struct dm_target *ti);
 typedef void (*dm_postsuspend_fn) (struct dm_target *ti);
 typedef int (*dm_preresume_fn) (struct dm_target *ti);
 typedef void (*dm_resume_fn) (struct dm_target *ti);
@@ -73,11 +79,8 @@ typedef void (*dm_status_fn) (struct dm_target *ti, status_type_t status_type,
 
 typedef int (*dm_message_fn) (struct dm_target *ti, unsigned argc, char **argv);
 
-typedef int (*dm_ioctl_fn) (struct dm_target *ti, unsigned int cmd,
-			    unsigned long arg);
-
-typedef int (*dm_merge_fn) (struct dm_target *ti, struct bvec_merge_data *bvm,
-			    struct bio_vec *biovec, int max_size);
+typedef int (*dm_prepare_ioctl_fn) (struct dm_target *ti,
+			    struct block_device **bdev, fmode_t *mode);
 
 /*
  * These iteration functions are typically used to check (and combine)
@@ -115,24 +118,20 @@ typedef int (*dm_busy_fn) (struct dm_target *ti);
 
 void dm_error(const char *message);
 
-/*
- * Combine device limits.
- */
-int dm_set_device_limits(struct dm_target *ti, struct dm_dev *dev,
-			 sector_t start, sector_t len, void *data);
-
 struct dm_dev {
 	struct block_device *bdev;
 	fmode_t mode;
 	char name[16];
 };
 
+dev_t dm_get_dev_t(const char *path);
+
 /*
  * Constructors should call these functions to ensure destination devices
  * are opened/closed correctly.
  */
 int dm_get_device(struct dm_target *ti, const char *path, fmode_t mode,
-						 struct dm_dev **result);
+		  struct dm_dev **result);
 void dm_put_device(struct dm_target *ti, struct dm_dev *d);
 
 /*
@@ -148,16 +147,18 @@ struct target_type {
 	dm_dtr_fn dtr;
 	dm_map_fn map;
 	dm_map_request_fn map_rq;
+	dm_clone_and_map_request_fn clone_and_map_rq;
+	dm_release_clone_request_fn release_clone_rq;
 	dm_endio_fn end_io;
 	dm_request_endio_fn rq_end_io;
 	dm_presuspend_fn presuspend;
+	dm_presuspend_undo_fn presuspend_undo;
 	dm_postsuspend_fn postsuspend;
 	dm_preresume_fn preresume;
 	dm_resume_fn resume;
 	dm_status_fn status;
 	dm_message_fn message;
-	dm_ioctl_fn ioctl;
-	dm_merge_fn merge;
+	dm_prepare_ioctl_fn prepare_ioctl;
 	dm_busy_fn busy;
 	dm_iterate_devices_fn iterate_devices;
 	dm_io_hints_fn io_hints;
@@ -290,8 +291,8 @@ struct dm_target_callbacks {
 struct dm_target_io {
 	struct dm_io *io;
 	struct dm_target *ti;
-	union map_info info;
 	unsigned target_bio_nr;
+	unsigned *len_ptr;
 	struct bio clone;
 };
 
@@ -372,6 +373,7 @@ int dm_create(int minor, struct mapped_device **md);
  */
 struct mapped_device *dm_get_md(dev_t dev);
 void dm_get(struct mapped_device *md);
+int dm_hold(struct mapped_device *md);
 void dm_put(struct mapped_device *md);
 
 /*
@@ -379,6 +381,12 @@ void dm_put(struct mapped_device *md);
  */
 void dm_set_mdptr(struct mapped_device *md, void *ptr);
 void *dm_get_mdptr(struct mapped_device *md);
+
+/*
+ * Export the device via the ioctl interface (uses mdptr).
+ */
+int dm_ioctl_export(struct mapped_device *md, const char *name,
+		    const char *uuid);
 
 /*
  * A device can still be used while suspended, but I/O is deferred.
@@ -402,10 +410,17 @@ int dm_copy_name_and_uuid(struct mapped_device *md, char *name, char *uuid);
 struct gendisk *dm_disk(struct mapped_device *md);
 int dm_suspended(struct dm_target *ti);
 int dm_noflush_suspending(struct dm_target *ti);
-union map_info *dm_get_mapinfo(struct bio *bio);
+void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors);
 union map_info *dm_get_rq_mapinfo(struct request *rq);
 
 struct queue_limits *dm_get_queue_limits(struct mapped_device *md);
+
+void dm_lock_md_type(struct mapped_device *md);
+void dm_unlock_md_type(struct mapped_device *md);
+void dm_set_md_type(struct mapped_device *md, unsigned type);
+unsigned dm_get_md_type(struct mapped_device *md);
+int dm_setup_md_queue(struct mapped_device *md);
+unsigned dm_table_get_type(struct dm_table *t);
 
 /*
  * Geometry functions.
@@ -447,9 +462,9 @@ int __must_check dm_set_target_max_io_len(struct dm_target *ti, sector_t len);
 /*
  * Table reference counting.
  */
-struct dm_table *dm_get_live_table(struct mapped_device *md);
-void dm_table_get(struct dm_table *t);
-void dm_table_put(struct dm_table *t);
+struct dm_table *dm_get_live_table(struct mapped_device *md, int *srcu_idx);
+void dm_put_live_table(struct mapped_device *md, int srcu_idx);
+void dm_sync_table(struct mapped_device *md);
 
 /*
  * Queries
@@ -463,6 +478,11 @@ struct mapped_device *dm_table_get_md(struct dm_table *t);
  * Trigger an event.
  */
 void dm_table_event(struct dm_table *t);
+
+/*
+ * Run the queue for request-based targets.
+ */
+void dm_table_run_md_queue_async(struct dm_table *t);
 
 /*
  * The device must be suspended before calling this method.
@@ -536,8 +556,6 @@ extern struct ratelimit_state dm_ratelimit_state;
 #define DMEMIT(x...) sz += ((sz >= maxlen) ? \
 			  0 : scnprintf(result + sz, maxlen - sz, x))
 
-#define SECTOR_SHIFT 9
-
 /*
  * Definitions of return values from target end_io function.
  */
@@ -550,6 +568,14 @@ extern struct ratelimit_state dm_ratelimit_state;
 #define DM_MAPIO_SUBMITTED	0
 #define DM_MAPIO_REMAPPED	1
 #define DM_MAPIO_REQUEUE	DM_ENDIO_REQUEUE
+
+#define dm_sector_div64(x, y)( \
+{ \
+	u64 _res; \
+	(x) = div64_u64_rem(x, y, &_res); \
+	_res; \
+} \
+)
 
 /*
  * Ceiling(n / sz)
@@ -578,7 +604,7 @@ extern struct ratelimit_state dm_ratelimit_state;
  */
 #define dm_target_offset(ti, sector) ((sector) - (ti)->begin)
 
-static inline sector_t to_sector(unsigned long n)
+static inline sector_t to_sector(unsigned long long n)
 {
 	return (n >> SECTOR_SHIFT);
 }
@@ -587,13 +613,5 @@ static inline unsigned long to_bytes(sector_t n)
 {
 	return (n << SECTOR_SHIFT);
 }
-
-/*-----------------------------------------------------------------
- * Helper for block layer and dm core operations
- *---------------------------------------------------------------*/
-void dm_dispatch_request(struct request *rq);
-void dm_requeue_unmapped_request(struct request *rq);
-void dm_kill_unmapped_request(struct request *rq, int error);
-int dm_underlying_device_busy(struct request_queue *q);
 
 #endif	/* _LINUX_DEVICE_MAPPER_H */

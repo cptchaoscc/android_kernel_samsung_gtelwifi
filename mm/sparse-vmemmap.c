@@ -40,7 +40,8 @@ static void * __init_refok __earlyonly_bootmem_alloc(int node,
 				unsigned long align,
 				unsigned long goal)
 {
-	return __alloc_bootmem_node_high(NODE_DATA(node), size, align, goal);
+	return memblock_virt_alloc_try_nid(size, align, goal,
+					    BOOTMEM_ALLOC_ACCESSIBLE, node);
 }
 
 static void *vmemmap_buf;
@@ -93,8 +94,8 @@ void __meminit vmemmap_verify(pte_t *pte, int node,
 	int actual_node = early_pfn_to_nid(pfn);
 
 	if (node_distance(actual_node, node) > LOCAL_DISTANCE)
-		printk(KERN_WARNING "[%lx-%lx] potential offnode "
-			"page_structs\n", start, end - 1);
+		printk(KERN_WARNING "[%lx-%lx] potential offnode page_structs\n",
+		       start, end - 1);
 }
 
 pte_t * __meminit vmemmap_pte_populate(pmd_t *pmd, unsigned long addr, int node)
@@ -219,14 +220,15 @@ void __init sparse_mem_maps_populate_node(struct page **map_map,
 		if (map_map[pnum])
 			continue;
 		ms = __nr_to_section(pnum);
-		printk(KERN_ERR "%s: sparsemem memory map backing failed "
-			"some memory will not be available.\n", __func__);
+		printk(KERN_ERR "%s: sparsemem memory map backing failed some memory will not be available.\n",
+		       __func__);
 		ms->section_mem_map = 0;
 	}
 
 	if (vmemmap_buf_start) {
 		/* need to free left buf */
-		free_bootmem(__pa(vmemmap_buf), vmemmap_buf_end - vmemmap_buf);
+		memblock_free_early(__pa(vmemmap_buf),
+				    vmemmap_buf_end - vmemmap_buf);
 		vmemmap_buf = NULL;
 		vmemmap_buf_end = NULL;
 	}

@@ -6,10 +6,6 @@
  *		 and date_dos2unix for date==0 by Igor Zhbanov(bsg@uniyar.ac.ru)
  */
 
-#include <linux/module.h>
-#include <linux/fs.h>
-#include <linux/buffer_head.h>
-#include <linux/time.h>
 #include "fat.h"
 
 /*
@@ -25,31 +21,20 @@ void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 	struct fat_mount_options *opts = &MSDOS_SB(sb)->options;
 	va_list args;
 	struct va_format vaf;
-	struct block_device *bdev = sb->s_bdev;
-	dev_t bd_dev = bdev ? bdev->bd_dev : 0;
 
 	if (report) {
 		va_start(args, fmt);
 		vaf.fmt = fmt;
 		vaf.va = &args;
-		printk(KERN_ERR "FAT-fs (%s[%d:%d]): error, %pV\n", 
-				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
-		if (opts->errors == FAT_ERRORS_RO && !(sb->s_flags & MS_RDONLY))
-			ST_LOG("FAT-fs (%s[%d:%d]): error, %pV\n",
-					sb->s_id, MAJOR(bd_dev), MINOR(bd_dev), &vaf);
+		fat_msg(sb, KERN_ERR, "error, %pV", &vaf);
 		va_end(args);
 	}
 
 	if (opts->errors == FAT_ERRORS_PANIC)
-		panic("FAT-fs (%s[%d:%d]): fs panic from previous error\n", 
-				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
+		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
 	else if (opts->errors == FAT_ERRORS_RO && !(sb->s_flags & MS_RDONLY)) {
 		sb->s_flags |= MS_RDONLY;
-		printk(KERN_ERR "FAT-fs (%s[%d:%d]): Filesystem has been "
-				"set read-only\n", 
-				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
-		ST_LOG("FAT-fs (%s[%d:%d]): Filesystem has been set read-only\n",
-				sb->s_id, MAJOR(bd_dev), MINOR(bd_dev));
+		fat_msg(sb, KERN_ERR, "Filesystem has been set read-only");
 	}
 }
 EXPORT_SYMBOL_GPL(__fat_fs_error);
@@ -100,7 +85,7 @@ int fat_clusters_flush(struct super_block *sb)
 			fsinfo->free_clusters = cpu_to_le32(sbi->free_clusters);
 		if (sbi->prev_free != -1)
 			fsinfo->next_cluster = cpu_to_le32(sbi->prev_free);
-		mark_buffer_dirty_sync(bh);
+		mark_buffer_dirty(bh);
 	}
 	brelse(bh);
 
@@ -174,8 +159,6 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 
 	return 0;
 }
-
-extern struct timezone sys_tz;
 
 /*
  * The epoch of FAT timestamp is 1980.

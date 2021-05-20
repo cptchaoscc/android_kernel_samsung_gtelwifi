@@ -18,7 +18,7 @@ static bool
 xt_rateest_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_rateest_match_info *info = par->matchinfo;
-	struct gnet_stats_rate_est *r;
+	struct gnet_stats_rate_est64 *r;
 	u_int32_t bps1, bps2, pps1, pps2;
 	bool ret = true;
 
@@ -135,6 +135,7 @@ static struct xt_match xt_rateest_mt_reg __read_mostly = {
 	.checkentry = xt_rateest_mt_checkentry,
 	.destroy    = xt_rateest_mt_destroy,
 	.matchsize  = sizeof(struct xt_rateest_match_info),
+	.usersize   = offsetof(struct xt_rateest_match_info, est1),
 	.me         = THIS_MODULE,
 };
 

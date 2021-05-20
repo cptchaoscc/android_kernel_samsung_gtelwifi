@@ -1,17 +1,17 @@
 /*
-+ * Debug helper to dump the current kernel pagetables of the system
-+ * so that we can see what the various memory ranges are set to.
-+ *
-+ * Derived from x86 implementation:
-+ * (C) Copyright 2008 Intel Corporation
-+ *
-+ * Author: Arjan van de Ven <arjan@linux.intel.com>
-+ *
-+ * This program is free software; you can redistribute it and/or
-+ * modify it under the terms of the GNU General Public License
-+ * as published by the Free Software Foundation; version 2
-+ * of the License.
-+ */
+ * Debug helper to dump the current kernel pagetables of the system
+ * so that we can see what the various memory ranges are set to.
+ *
+ * Derived from x86 implementation:
+ * (C) Copyright 2008 Intel Corporation
+ *
+ * Author: Arjan van de Ven <arjan@linux.intel.com>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; version 2
+ * of the License.
+ */
 #include <linux/debugfs.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
@@ -19,12 +19,6 @@
 
 #include <asm/fixmap.h>
 #include <asm/pgtable.h>
-
-static unsigned long cma_virt_start = 0;
-static unsigned long cma_virt_end = 0;
-
-unsigned long cache_type = 0, buffer_type = 0;
-int temp_flag = 1;
 
 struct addr_marker {
 	unsigned long start_address;
@@ -94,10 +88,12 @@ static const struct prot_bits pte_bits[] = {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_WRITEBACK,
 		.set	= "MEM/CACHED/WBRA",
+#ifndef CONFIG_ARM_LPAE
 	}, {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_MINICACHE,
 		.set	= "MEM/MINICACHE",
+#endif
 	}, {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_WRITEALLOC,
@@ -106,10 +102,12 @@ static const struct prot_bits pte_bits[] = {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_DEV_SHARED,
 		.set	= "DEV/SHARED",
+#ifndef CONFIG_ARM_LPAE
 	}, {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_DEV_NONSHARED,
 		.set	= "DEV/NONSHARED",
+#endif
 	}, {
 		.mask	= L_PTE_MT_MASK,
 		.val	= L_PTE_MT_DEV_WC,
@@ -122,23 +120,52 @@ static const struct prot_bits pte_bits[] = {
 };
 
 static const struct prot_bits section_bits[] = {
-	/* These are approximate */
+#ifdef CONFIG_ARM_LPAE
 	{
-		.mask	= PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
-		.val	= 0,
+		.mask	= PMD_SECT_USER,
+		.val	= PMD_SECT_USER,
+		.set	= "USR",
+	}, {
+		.mask	= L_PMD_SECT_RDONLY | PMD_SECT_AP2,
+		.val	= L_PMD_SECT_RDONLY | PMD_SECT_AP2,
+		.set	= "ro",
+		.clear	= "RW",
+#elif __LINUX_ARM_ARCH__ >= 6
+	{
+		.mask	= PMD_SECT_APX | PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.val	= PMD_SECT_APX | PMD_SECT_AP_WRITE,
 		.set	= "    ro",
 	}, {
-		.mask	= PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.mask	= PMD_SECT_APX | PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
 		.val	= PMD_SECT_AP_WRITE,
 		.set	= "    RW",
 	}, {
-		.mask	= PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.mask	= PMD_SECT_APX | PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
 		.val	= PMD_SECT_AP_READ,
-		.set	= "USR RO",
+		.set	= "USR ro",
 	}, {
-		.mask	= PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.mask	= PMD_SECT_APX | PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
 		.val	= PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
 		.set	= "USR RW",
+#else /* ARMv4/ARMv5  */
+	/* These are approximate */
+	{
+		.mask   = PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.val    = 0,
+		.set    = "    ro",
+	}, {
+		.mask   = PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.val    = PMD_SECT_AP_WRITE,
+		.set    = "    RW",
+	}, {
+		.mask   = PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.val    = PMD_SECT_AP_READ,
+		.set    = "USR ro",
+	}, {
+		.mask   = PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.val    = PMD_SECT_AP_READ | PMD_SECT_AP_WRITE,
+		.set    = "USR RW",
+#endif
 	}, {
 		.mask	= PMD_SECT_XN,
 		.val	= PMD_SECT_XN,
@@ -157,6 +184,7 @@ struct pg_level {
 	size_t num;
 	u64 mask;
 };
+
 static struct pg_level pg_level[] = {
 	{
 	}, { /* pgd */
@@ -170,15 +198,7 @@ static struct pg_level pg_level[] = {
 	},
 };
 
-void cma_range_populate(unsigned long virt_start, unsigned long virt_end)
-{
-	cma_virt_start	= virt_start;
-	cma_virt_end	= virt_end;
-}
-
-static void
-dump_prot(struct pg_state *st,
-		const struct prot_bits *bits, size_t num,unsigned long addr)
+static void dump_prot(struct pg_state *st, const struct prot_bits *bits, size_t num)
 {
 	unsigned i;
 
@@ -190,83 +210,43 @@ dump_prot(struct pg_state *st,
 		else
 			s = bits->clear;
 
-		if(s) {
-			if(temp_flag != 0)
-				seq_printf(st->seq, " %s", s);
-
-			/* The cma_virt_start and cma_virt_end are the virtual
-			 * addresses of the CMA(40mb) declared in defconfig file
-			 */
-			if( st->start_address >= cma_virt_start &&
-				st->start_address < cma_virt_end &&
-				addr > cma_virt_start && addr <= cma_virt_end ) {
-				if(bits->val == L_PTE_MT_WRITETHROUGH ||
-					bits->val == L_PTE_MT_WRITEBACK ||
-					bits->val == L_PTE_MT_MINICACHE ||
-					bits->val == L_PTE_MT_DEV_CACHED ||
-					bits->val == L_PTE_MT_WRITEALLOC ) {
-					unsigned long ctype =
-						addr - st->start_address;
-					cache_type += ctype;
-				}
-				if(bits->val == L_PTE_MT_BUFFERABLE ) {
-					unsigned long btype =
-						addr - st->start_address;
-					buffer_type += btype;
-				}
-			}
-		}
+		if (s)
+			seq_printf(st->seq, " %s", s);
 	}
 }
 
-static void
-note_page(struct pg_state *st, unsigned long addr, unsigned level, u64 val)
+static void note_page(struct pg_state *st, unsigned long addr, unsigned level, u64 val)
 {
 	static const char units[] = "KMGTPE";
 	u64 prot = val & pg_level[level].mask;
 
-	if (addr < USER_PGTABLES_CEILING)
-		return;
-
 	if (!st->level) {
 		st->level = level;
 		st->current_prot = prot;
-		if(temp_flag!=0)
-			seq_printf(st->seq, "---[ %s ]---\n",
-							st->marker->name);
-	}
-	else if (prot != st->current_prot || level != st->level ||
+		seq_printf(st->seq, "---[ %s ]---\n", st->marker->name);
+	} else if (prot != st->current_prot || level != st->level ||
 		   addr >= st->marker[1].start_address) {
-
 		const char *unit = units;
+		unsigned long delta;
 
 		if (st->current_prot) {
-			unsigned long delta;
-			if(temp_flag!=0)
-				seq_printf(st->seq, "0x%08lx-0x%08lx   ",
-						st->start_address, addr);
+			seq_printf(st->seq, "0x%08lx-0x%08lx   ",
+				   st->start_address, addr);
 
 			delta = (addr - st->start_address) >> 10;
 			while (!(delta & 1023) && unit[1]) {
 				delta >>= 10;
 				unit++;
 			}
-			if(temp_flag!=0)
-				seq_printf(st->seq, "%9lu%c", delta, *unit);
-
+			seq_printf(st->seq, "%9lu%c", delta, *unit);
 			if (pg_level[st->level].bits)
-				dump_prot(st, pg_level[st->level].bits,
-						pg_level[st->level].num, addr);
-
-			if(temp_flag!=0)
-				seq_printf(st->seq, "\n");
+				dump_prot(st, pg_level[st->level].bits, pg_level[st->level].num);
+			seq_printf(st->seq, "\n");
 		}
 
 		if (addr >= st->marker[1].start_address) {
 			st->marker++;
-			if(temp_flag!=0)
-				seq_printf(st->seq,
-					"---[ %s ]---\n", st->marker->name);
+			seq_printf(st->seq, "---[ %s ]---\n", st->marker->name);
 		}
 		st->start_address = addr;
 		st->current_prot = prot;
@@ -277,10 +257,10 @@ note_page(struct pg_state *st, unsigned long addr, unsigned level, u64 val)
 static void walk_pte(struct pg_state *st, pmd_t *pmd, unsigned long start)
 {
 	pte_t *pte = pte_offset_kernel(pmd, 0);
+	unsigned long addr;
 	unsigned i;
 
 	for (i = 0; i < PTRS_PER_PTE; i++, pte++) {
-		unsigned long addr;
 		addr = start + i * PAGE_SIZE;
 		note_page(st, addr, 4, pte_val(*pte));
 	}
@@ -289,25 +269,28 @@ static void walk_pte(struct pg_state *st, pmd_t *pmd, unsigned long start)
 static void walk_pmd(struct pg_state *st, pud_t *pud, unsigned long start)
 {
 	pmd_t *pmd = pmd_offset(pud, 0);
+	unsigned long addr;
 	unsigned i;
 
 	for (i = 0; i < PTRS_PER_PMD; i++, pmd++) {
-		unsigned long addr;
 		addr = start + i * PMD_SIZE;
 		if (pmd_none(*pmd) || pmd_large(*pmd) || !pmd_present(*pmd))
 			note_page(st, addr, 3, pmd_val(*pmd));
 		else
 			walk_pte(st, pmd, addr);
+
+		if (SECTION_SIZE < PMD_SIZE && pmd_large(pmd[1]))
+			note_page(st, addr + SECTION_SIZE, 3, pmd_val(pmd[1]));
 	}
 }
 
 static void walk_pud(struct pg_state *st, pgd_t *pgd, unsigned long start)
 {
 	pud_t *pud = pud_offset(pgd, 0);
+	unsigned long addr;
 	unsigned i;
 
 	for (i = 0; i < PTRS_PER_PUD; i++, pud++) {
-		unsigned long addr;
 		addr = start + i * PUD_SIZE;
 		if (!pud_none(*pud)) {
 			walk_pmd(st, pud, addr);
@@ -316,22 +299,19 @@ static void walk_pud(struct pg_state *st, pgd_t *pgd, unsigned long start)
 		}
 	}
 }
+
 static void walk_pgd(struct seq_file *m)
 {
 	pgd_t *pgd = swapper_pg_dir;
 	struct pg_state st;
+	unsigned long addr;
 	unsigned i;
 
 	memset(&st, 0, sizeof(st));
 	st.seq = m;
 	st.marker = address_markers;
 
-	cache_type = 0;
-	buffer_type = 0;
-
-	for (i = USER_PGTABLES_CEILING / PGDIR_SIZE;
-	     i < PTRS_PER_PGD; i++, pgd++) {
-		unsigned long addr;
+	for (i = 0; i < PTRS_PER_PGD; i++, pgd++) {
 		addr = i * PGDIR_SIZE;
 		if (!pgd_none(*pgd)) {
 			walk_pud(&st, pgd, addr);
@@ -343,19 +323,8 @@ static void walk_pgd(struct seq_file *m)
 	note_page(&st, 0, 0, 0);
 }
 
-void cma_walk_pgd(struct seq_file *m)
-{
-	temp_flag = 0;
-	walk_pgd(m);
-	seq_printf(m,"Cacheable:				%lu kB\n",
-							cache_type/SZ_1K);
-	seq_printf(m,"Bufferable:				%lu kB\n",
-							buffer_type/SZ_1K);
-}
-
 static int ptdump_show(struct seq_file *m, void *v)
 {
-	temp_flag = 1;
 	walk_pgd(m);
 	return 0;
 }

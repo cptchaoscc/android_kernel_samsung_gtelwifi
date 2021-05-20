@@ -25,7 +25,6 @@
 #include <linux/slab.h>
 #include <linux/bsg-lib.h>
 #include <linux/idr.h>
-#include <linux/list.h>
 #include <net/tcp.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
@@ -37,6 +36,8 @@
 #include <scsi/scsi_bsg_iscsi.h>
 
 #define ISCSI_TRANSPORT_VERSION "2.0-870"
+
+#define ISCSI_SEND_MAX_ALLOWED  10
 
 static int dbg_session;
 module_param_named(debug_session, dbg_session, int,
@@ -118,7 +119,11 @@ show_transport_handle(struct device *dev, struct device_attribute *attr,
 		      char *buf)
 {
 	struct iscsi_internal *priv = dev_to_iscsi_internal(dev);
-	return sprintf(buf, "%llu\n", (unsigned long long)iscsi_handle(priv->iscsi_transport));
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EACCES;
+	return sysfs_emit(buf, "%llu\n",
+		  (unsigned long long)iscsi_handle(priv->iscsi_transport));
 }
 static DEVICE_ATTR(handle, S_IRUGO, show_transport_handle, NULL);
 
@@ -128,7 +133,7 @@ show_transport_##name(struct device *dev, 				\
 		      struct device_attribute *attr,char *buf)		\
 {									\
 	struct iscsi_internal *priv = dev_to_iscsi_internal(dev);	\
-	return sprintf(buf, format"\n", priv->iscsi_transport->name);	\
+	return sysfs_emit(buf, format"\n", priv->iscsi_transport->name);\
 }									\
 static DEVICE_ATTR(name, S_IRUGO, show_transport_##name, NULL);
 
@@ -169,7 +174,7 @@ static ssize_t
 show_ep_handle(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct iscsi_endpoint *ep = iscsi_dev_to_endpoint(dev);
-	return sprintf(buf, "%llu\n", (unsigned long long) ep->id);
+	return sysfs_emit(buf, "%llu\n", (unsigned long long) ep->id);
 }
 static ISCSI_ATTR(ep, handle, S_IRUGO, show_ep_handle, NULL);
 
@@ -205,6 +210,8 @@ iscsi_create_endpoint(int dd_size)
 					iscsi_match_epid);
 		if (!dev)
 			break;
+		else
+			put_device(dev);
 	}
 	if (id == ISCSI_MAX_EPID) {
 		printk(KERN_ERR "Too many connections. Max supported %u\n",
@@ -306,20 +313,71 @@ show_##type##_##name(struct device *dev, struct device_attribute *attr,	\
 	iscsi_iface_attr_show(type, name, ISCSI_NET_PARAM, param)	\
 static ISCSI_IFACE_ATTR(type, name, S_IRUGO, show_##type##_##name, NULL);
 
-/* generic read only ipvi4 attribute */
+#define iscsi_iface_attr(type, name, param)				\
+	iscsi_iface_attr_show(type, name, ISCSI_IFACE_PARAM, param)	\
+static ISCSI_IFACE_ATTR(type, name, S_IRUGO, show_##type##_##name, NULL);
+
+/* generic read only ipv4 attribute */
 iscsi_iface_net_attr(ipv4_iface, ipaddress, ISCSI_NET_PARAM_IPV4_ADDR);
 iscsi_iface_net_attr(ipv4_iface, gateway, ISCSI_NET_PARAM_IPV4_GW);
 iscsi_iface_net_attr(ipv4_iface, subnet, ISCSI_NET_PARAM_IPV4_SUBNET);
 iscsi_iface_net_attr(ipv4_iface, bootproto, ISCSI_NET_PARAM_IPV4_BOOTPROTO);
+iscsi_iface_net_attr(ipv4_iface, dhcp_dns_address_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_DNS_ADDR_EN);
+iscsi_iface_net_attr(ipv4_iface, dhcp_slp_da_info_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_SLP_DA_EN);
+iscsi_iface_net_attr(ipv4_iface, tos_en, ISCSI_NET_PARAM_IPV4_TOS_EN);
+iscsi_iface_net_attr(ipv4_iface, tos, ISCSI_NET_PARAM_IPV4_TOS);
+iscsi_iface_net_attr(ipv4_iface, grat_arp_en,
+		     ISCSI_NET_PARAM_IPV4_GRAT_ARP_EN);
+iscsi_iface_net_attr(ipv4_iface, dhcp_alt_client_id_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_ALT_CLIENT_ID_EN);
+iscsi_iface_net_attr(ipv4_iface, dhcp_alt_client_id,
+		     ISCSI_NET_PARAM_IPV4_DHCP_ALT_CLIENT_ID);
+iscsi_iface_net_attr(ipv4_iface, dhcp_req_vendor_id_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_REQ_VENDOR_ID_EN);
+iscsi_iface_net_attr(ipv4_iface, dhcp_use_vendor_id_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_USE_VENDOR_ID_EN);
+iscsi_iface_net_attr(ipv4_iface, dhcp_vendor_id,
+		     ISCSI_NET_PARAM_IPV4_DHCP_VENDOR_ID);
+iscsi_iface_net_attr(ipv4_iface, dhcp_learn_iqn_en,
+		     ISCSI_NET_PARAM_IPV4_DHCP_LEARN_IQN_EN);
+iscsi_iface_net_attr(ipv4_iface, fragment_disable,
+		     ISCSI_NET_PARAM_IPV4_FRAGMENT_DISABLE);
+iscsi_iface_net_attr(ipv4_iface, incoming_forwarding_en,
+		     ISCSI_NET_PARAM_IPV4_IN_FORWARD_EN);
+iscsi_iface_net_attr(ipv4_iface, ttl, ISCSI_NET_PARAM_IPV4_TTL);
 
 /* generic read only ipv6 attribute */
 iscsi_iface_net_attr(ipv6_iface, ipaddress, ISCSI_NET_PARAM_IPV6_ADDR);
-iscsi_iface_net_attr(ipv6_iface, link_local_addr, ISCSI_NET_PARAM_IPV6_LINKLOCAL);
+iscsi_iface_net_attr(ipv6_iface, link_local_addr,
+		     ISCSI_NET_PARAM_IPV6_LINKLOCAL);
 iscsi_iface_net_attr(ipv6_iface, router_addr, ISCSI_NET_PARAM_IPV6_ROUTER);
 iscsi_iface_net_attr(ipv6_iface, ipaddr_autocfg,
 		     ISCSI_NET_PARAM_IPV6_ADDR_AUTOCFG);
 iscsi_iface_net_attr(ipv6_iface, link_local_autocfg,
 		     ISCSI_NET_PARAM_IPV6_LINKLOCAL_AUTOCFG);
+iscsi_iface_net_attr(ipv6_iface, link_local_state,
+		     ISCSI_NET_PARAM_IPV6_LINKLOCAL_STATE);
+iscsi_iface_net_attr(ipv6_iface, router_state,
+		     ISCSI_NET_PARAM_IPV6_ROUTER_STATE);
+iscsi_iface_net_attr(ipv6_iface, grat_neighbor_adv_en,
+		     ISCSI_NET_PARAM_IPV6_GRAT_NEIGHBOR_ADV_EN);
+iscsi_iface_net_attr(ipv6_iface, mld_en, ISCSI_NET_PARAM_IPV6_MLD_EN);
+iscsi_iface_net_attr(ipv6_iface, flow_label, ISCSI_NET_PARAM_IPV6_FLOW_LABEL);
+iscsi_iface_net_attr(ipv6_iface, traffic_class,
+		     ISCSI_NET_PARAM_IPV6_TRAFFIC_CLASS);
+iscsi_iface_net_attr(ipv6_iface, hop_limit, ISCSI_NET_PARAM_IPV6_HOP_LIMIT);
+iscsi_iface_net_attr(ipv6_iface, nd_reachable_tmo,
+		     ISCSI_NET_PARAM_IPV6_ND_REACHABLE_TMO);
+iscsi_iface_net_attr(ipv6_iface, nd_rexmit_time,
+		     ISCSI_NET_PARAM_IPV6_ND_REXMIT_TIME);
+iscsi_iface_net_attr(ipv6_iface, nd_stale_tmo,
+		     ISCSI_NET_PARAM_IPV6_ND_STALE_TMO);
+iscsi_iface_net_attr(ipv6_iface, dup_addr_detect_cnt,
+		     ISCSI_NET_PARAM_IPV6_DUP_ADDR_DETECT_CNT);
+iscsi_iface_net_attr(ipv6_iface, router_adv_link_mtu,
+		     ISCSI_NET_PARAM_IPV6_RTR_ADV_LINK_MTU);
 
 /* common read only iface attribute */
 iscsi_iface_net_attr(iface, enabled, ISCSI_NET_PARAM_IFACE_ENABLE);
@@ -328,6 +386,40 @@ iscsi_iface_net_attr(iface, vlan_priority, ISCSI_NET_PARAM_VLAN_PRIORITY);
 iscsi_iface_net_attr(iface, vlan_enabled, ISCSI_NET_PARAM_VLAN_ENABLED);
 iscsi_iface_net_attr(iface, mtu, ISCSI_NET_PARAM_MTU);
 iscsi_iface_net_attr(iface, port, ISCSI_NET_PARAM_PORT);
+iscsi_iface_net_attr(iface, ipaddress_state, ISCSI_NET_PARAM_IPADDR_STATE);
+iscsi_iface_net_attr(iface, delayed_ack_en, ISCSI_NET_PARAM_DELAYED_ACK_EN);
+iscsi_iface_net_attr(iface, tcp_nagle_disable,
+		     ISCSI_NET_PARAM_TCP_NAGLE_DISABLE);
+iscsi_iface_net_attr(iface, tcp_wsf_disable, ISCSI_NET_PARAM_TCP_WSF_DISABLE);
+iscsi_iface_net_attr(iface, tcp_wsf, ISCSI_NET_PARAM_TCP_WSF);
+iscsi_iface_net_attr(iface, tcp_timer_scale, ISCSI_NET_PARAM_TCP_TIMER_SCALE);
+iscsi_iface_net_attr(iface, tcp_timestamp_en, ISCSI_NET_PARAM_TCP_TIMESTAMP_EN);
+iscsi_iface_net_attr(iface, cache_id, ISCSI_NET_PARAM_CACHE_ID);
+iscsi_iface_net_attr(iface, redirect_en, ISCSI_NET_PARAM_REDIRECT_EN);
+
+/* common iscsi specific settings attributes */
+iscsi_iface_attr(iface, def_taskmgmt_tmo, ISCSI_IFACE_PARAM_DEF_TASKMGMT_TMO);
+iscsi_iface_attr(iface, header_digest, ISCSI_IFACE_PARAM_HDRDGST_EN);
+iscsi_iface_attr(iface, data_digest, ISCSI_IFACE_PARAM_DATADGST_EN);
+iscsi_iface_attr(iface, immediate_data, ISCSI_IFACE_PARAM_IMM_DATA_EN);
+iscsi_iface_attr(iface, initial_r2t, ISCSI_IFACE_PARAM_INITIAL_R2T_EN);
+iscsi_iface_attr(iface, data_seq_in_order,
+		 ISCSI_IFACE_PARAM_DATASEQ_INORDER_EN);
+iscsi_iface_attr(iface, data_pdu_in_order, ISCSI_IFACE_PARAM_PDU_INORDER_EN);
+iscsi_iface_attr(iface, erl, ISCSI_IFACE_PARAM_ERL);
+iscsi_iface_attr(iface, max_recv_dlength, ISCSI_IFACE_PARAM_MAX_RECV_DLENGTH);
+iscsi_iface_attr(iface, first_burst_len, ISCSI_IFACE_PARAM_FIRST_BURST);
+iscsi_iface_attr(iface, max_outstanding_r2t, ISCSI_IFACE_PARAM_MAX_R2T);
+iscsi_iface_attr(iface, max_burst_len, ISCSI_IFACE_PARAM_MAX_BURST);
+iscsi_iface_attr(iface, chap_auth, ISCSI_IFACE_PARAM_CHAP_AUTH_EN);
+iscsi_iface_attr(iface, bidi_chap, ISCSI_IFACE_PARAM_BIDI_CHAP_EN);
+iscsi_iface_attr(iface, discovery_auth_optional,
+		 ISCSI_IFACE_PARAM_DISCOVERY_AUTH_OPTIONAL);
+iscsi_iface_attr(iface, discovery_logout,
+		 ISCSI_IFACE_PARAM_DISCOVERY_LOGOUT_EN);
+iscsi_iface_attr(iface, strict_login_comp_en,
+		 ISCSI_IFACE_PARAM_STRICT_LOGIN_COMP_EN);
+iscsi_iface_attr(iface, initiator_name, ISCSI_IFACE_PARAM_INITIATOR_NAME);
 
 static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 					  struct attribute *attr, int i)
@@ -336,6 +428,7 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 	struct iscsi_iface *iface = iscsi_dev_to_iface(dev);
 	struct iscsi_transport *t = iface->transport;
 	int param;
+	int param_type;
 
 	if (attr == &dev_attr_iface_enabled.attr)
 		param = ISCSI_NET_PARAM_IFACE_ENABLE;
@@ -349,6 +442,60 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 		param = ISCSI_NET_PARAM_MTU;
 	else if (attr == &dev_attr_iface_port.attr)
 		param = ISCSI_NET_PARAM_PORT;
+	else if (attr == &dev_attr_iface_ipaddress_state.attr)
+		param = ISCSI_NET_PARAM_IPADDR_STATE;
+	else if (attr == &dev_attr_iface_delayed_ack_en.attr)
+		param = ISCSI_NET_PARAM_DELAYED_ACK_EN;
+	else if (attr == &dev_attr_iface_tcp_nagle_disable.attr)
+		param = ISCSI_NET_PARAM_TCP_NAGLE_DISABLE;
+	else if (attr == &dev_attr_iface_tcp_wsf_disable.attr)
+		param = ISCSI_NET_PARAM_TCP_WSF_DISABLE;
+	else if (attr == &dev_attr_iface_tcp_wsf.attr)
+		param = ISCSI_NET_PARAM_TCP_WSF;
+	else if (attr == &dev_attr_iface_tcp_timer_scale.attr)
+		param = ISCSI_NET_PARAM_TCP_TIMER_SCALE;
+	else if (attr == &dev_attr_iface_tcp_timestamp_en.attr)
+		param = ISCSI_NET_PARAM_TCP_TIMESTAMP_EN;
+	else if (attr == &dev_attr_iface_cache_id.attr)
+		param = ISCSI_NET_PARAM_CACHE_ID;
+	else if (attr == &dev_attr_iface_redirect_en.attr)
+		param = ISCSI_NET_PARAM_REDIRECT_EN;
+	else if (attr == &dev_attr_iface_def_taskmgmt_tmo.attr)
+		param = ISCSI_IFACE_PARAM_DEF_TASKMGMT_TMO;
+	else if (attr == &dev_attr_iface_header_digest.attr)
+		param = ISCSI_IFACE_PARAM_HDRDGST_EN;
+	else if (attr == &dev_attr_iface_data_digest.attr)
+		param = ISCSI_IFACE_PARAM_DATADGST_EN;
+	else if (attr == &dev_attr_iface_immediate_data.attr)
+		param = ISCSI_IFACE_PARAM_IMM_DATA_EN;
+	else if (attr == &dev_attr_iface_initial_r2t.attr)
+		param = ISCSI_IFACE_PARAM_INITIAL_R2T_EN;
+	else if (attr == &dev_attr_iface_data_seq_in_order.attr)
+		param = ISCSI_IFACE_PARAM_DATASEQ_INORDER_EN;
+	else if (attr == &dev_attr_iface_data_pdu_in_order.attr)
+		param = ISCSI_IFACE_PARAM_PDU_INORDER_EN;
+	else if (attr == &dev_attr_iface_erl.attr)
+		param = ISCSI_IFACE_PARAM_ERL;
+	else if (attr == &dev_attr_iface_max_recv_dlength.attr)
+		param = ISCSI_IFACE_PARAM_MAX_RECV_DLENGTH;
+	else if (attr == &dev_attr_iface_first_burst_len.attr)
+		param = ISCSI_IFACE_PARAM_FIRST_BURST;
+	else if (attr == &dev_attr_iface_max_outstanding_r2t.attr)
+		param = ISCSI_IFACE_PARAM_MAX_R2T;
+	else if (attr == &dev_attr_iface_max_burst_len.attr)
+		param = ISCSI_IFACE_PARAM_MAX_BURST;
+	else if (attr == &dev_attr_iface_chap_auth.attr)
+		param = ISCSI_IFACE_PARAM_CHAP_AUTH_EN;
+	else if (attr == &dev_attr_iface_bidi_chap.attr)
+		param = ISCSI_IFACE_PARAM_BIDI_CHAP_EN;
+	else if (attr == &dev_attr_iface_discovery_auth_optional.attr)
+		param = ISCSI_IFACE_PARAM_DISCOVERY_AUTH_OPTIONAL;
+	else if (attr == &dev_attr_iface_discovery_logout.attr)
+		param = ISCSI_IFACE_PARAM_DISCOVERY_LOGOUT_EN;
+	else if (attr == &dev_attr_iface_strict_login_comp_en.attr)
+		param = ISCSI_IFACE_PARAM_STRICT_LOGIN_COMP_EN;
+	else if (attr == &dev_attr_iface_initiator_name.attr)
+		param = ISCSI_IFACE_PARAM_INITIATOR_NAME;
 	else if (iface->iface_type == ISCSI_IFACE_TYPE_IPV4) {
 		if (attr == &dev_attr_ipv4_iface_ipaddress.attr)
 			param = ISCSI_NET_PARAM_IPV4_ADDR;
@@ -358,6 +505,42 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 			param = ISCSI_NET_PARAM_IPV4_SUBNET;
 		else if (attr == &dev_attr_ipv4_iface_bootproto.attr)
 			param = ISCSI_NET_PARAM_IPV4_BOOTPROTO;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_dns_address_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_DNS_ADDR_EN;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_slp_da_info_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_SLP_DA_EN;
+		else if (attr == &dev_attr_ipv4_iface_tos_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_TOS_EN;
+		else if (attr == &dev_attr_ipv4_iface_tos.attr)
+			param = ISCSI_NET_PARAM_IPV4_TOS;
+		else if (attr == &dev_attr_ipv4_iface_grat_arp_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_GRAT_ARP_EN;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_alt_client_id_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_ALT_CLIENT_ID_EN;
+		else if (attr == &dev_attr_ipv4_iface_dhcp_alt_client_id.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_ALT_CLIENT_ID;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_req_vendor_id_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_REQ_VENDOR_ID_EN;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_use_vendor_id_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_USE_VENDOR_ID_EN;
+		else if (attr == &dev_attr_ipv4_iface_dhcp_vendor_id.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_VENDOR_ID;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_dhcp_learn_iqn_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_DHCP_LEARN_IQN_EN;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_fragment_disable.attr)
+			param = ISCSI_NET_PARAM_IPV4_FRAGMENT_DISABLE;
+		else if (attr ==
+			 &dev_attr_ipv4_iface_incoming_forwarding_en.attr)
+			param = ISCSI_NET_PARAM_IPV4_IN_FORWARD_EN;
+		else if (attr == &dev_attr_ipv4_iface_ttl.attr)
+			param = ISCSI_NET_PARAM_IPV4_TTL;
 		else
 			return 0;
 	} else if (iface->iface_type == ISCSI_IFACE_TYPE_IPV6) {
@@ -371,6 +554,31 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 			param = ISCSI_NET_PARAM_IPV6_ADDR_AUTOCFG;
 		else if (attr == &dev_attr_ipv6_iface_link_local_autocfg.attr)
 			param = ISCSI_NET_PARAM_IPV6_LINKLOCAL_AUTOCFG;
+		else if (attr == &dev_attr_ipv6_iface_link_local_state.attr)
+			param = ISCSI_NET_PARAM_IPV6_LINKLOCAL_STATE;
+		else if (attr == &dev_attr_ipv6_iface_router_state.attr)
+			param = ISCSI_NET_PARAM_IPV6_ROUTER_STATE;
+		else if (attr ==
+			 &dev_attr_ipv6_iface_grat_neighbor_adv_en.attr)
+			param = ISCSI_NET_PARAM_IPV6_GRAT_NEIGHBOR_ADV_EN;
+		else if (attr == &dev_attr_ipv6_iface_mld_en.attr)
+			param = ISCSI_NET_PARAM_IPV6_MLD_EN;
+		else if (attr == &dev_attr_ipv6_iface_flow_label.attr)
+			param = ISCSI_NET_PARAM_IPV6_FLOW_LABEL;
+		else if (attr == &dev_attr_ipv6_iface_traffic_class.attr)
+			param = ISCSI_NET_PARAM_IPV6_TRAFFIC_CLASS;
+		else if (attr == &dev_attr_ipv6_iface_hop_limit.attr)
+			param = ISCSI_NET_PARAM_IPV6_HOP_LIMIT;
+		else if (attr == &dev_attr_ipv6_iface_nd_reachable_tmo.attr)
+			param = ISCSI_NET_PARAM_IPV6_ND_REACHABLE_TMO;
+		else if (attr == &dev_attr_ipv6_iface_nd_rexmit_time.attr)
+			param = ISCSI_NET_PARAM_IPV6_ND_REXMIT_TIME;
+		else if (attr == &dev_attr_ipv6_iface_nd_stale_tmo.attr)
+			param = ISCSI_NET_PARAM_IPV6_ND_STALE_TMO;
+		else if (attr == &dev_attr_ipv6_iface_dup_addr_detect_cnt.attr)
+			param = ISCSI_NET_PARAM_IPV6_DUP_ADDR_DETECT_CNT;
+		else if (attr == &dev_attr_ipv6_iface_router_adv_link_mtu.attr)
+			param = ISCSI_NET_PARAM_IPV6_RTR_ADV_LINK_MTU;
 		else
 			return 0;
 	} else {
@@ -378,7 +586,32 @@ static umode_t iscsi_iface_attr_is_visible(struct kobject *kobj,
 		return 0;
 	}
 
-	return t->attr_is_visible(ISCSI_NET_PARAM, param);
+	switch (param) {
+	case ISCSI_IFACE_PARAM_DEF_TASKMGMT_TMO:
+	case ISCSI_IFACE_PARAM_HDRDGST_EN:
+	case ISCSI_IFACE_PARAM_DATADGST_EN:
+	case ISCSI_IFACE_PARAM_IMM_DATA_EN:
+	case ISCSI_IFACE_PARAM_INITIAL_R2T_EN:
+	case ISCSI_IFACE_PARAM_DATASEQ_INORDER_EN:
+	case ISCSI_IFACE_PARAM_PDU_INORDER_EN:
+	case ISCSI_IFACE_PARAM_ERL:
+	case ISCSI_IFACE_PARAM_MAX_RECV_DLENGTH:
+	case ISCSI_IFACE_PARAM_FIRST_BURST:
+	case ISCSI_IFACE_PARAM_MAX_R2T:
+	case ISCSI_IFACE_PARAM_MAX_BURST:
+	case ISCSI_IFACE_PARAM_CHAP_AUTH_EN:
+	case ISCSI_IFACE_PARAM_BIDI_CHAP_EN:
+	case ISCSI_IFACE_PARAM_DISCOVERY_AUTH_OPTIONAL:
+	case ISCSI_IFACE_PARAM_DISCOVERY_LOGOUT_EN:
+	case ISCSI_IFACE_PARAM_STRICT_LOGIN_COMP_EN:
+	case ISCSI_IFACE_PARAM_INITIATOR_NAME:
+		param_type = ISCSI_IFACE_PARAM;
+		break;
+	default:
+		param_type = ISCSI_NET_PARAM;
+	}
+
+	return t->attr_is_visible(param_type, param);
 }
 
 static struct attribute *iscsi_iface_attrs[] = {
@@ -397,6 +630,59 @@ static struct attribute *iscsi_iface_attrs[] = {
 	&dev_attr_ipv6_iface_link_local_autocfg.attr,
 	&dev_attr_iface_mtu.attr,
 	&dev_attr_iface_port.attr,
+	&dev_attr_iface_ipaddress_state.attr,
+	&dev_attr_iface_delayed_ack_en.attr,
+	&dev_attr_iface_tcp_nagle_disable.attr,
+	&dev_attr_iface_tcp_wsf_disable.attr,
+	&dev_attr_iface_tcp_wsf.attr,
+	&dev_attr_iface_tcp_timer_scale.attr,
+	&dev_attr_iface_tcp_timestamp_en.attr,
+	&dev_attr_iface_cache_id.attr,
+	&dev_attr_iface_redirect_en.attr,
+	&dev_attr_iface_def_taskmgmt_tmo.attr,
+	&dev_attr_iface_header_digest.attr,
+	&dev_attr_iface_data_digest.attr,
+	&dev_attr_iface_immediate_data.attr,
+	&dev_attr_iface_initial_r2t.attr,
+	&dev_attr_iface_data_seq_in_order.attr,
+	&dev_attr_iface_data_pdu_in_order.attr,
+	&dev_attr_iface_erl.attr,
+	&dev_attr_iface_max_recv_dlength.attr,
+	&dev_attr_iface_first_burst_len.attr,
+	&dev_attr_iface_max_outstanding_r2t.attr,
+	&dev_attr_iface_max_burst_len.attr,
+	&dev_attr_iface_chap_auth.attr,
+	&dev_attr_iface_bidi_chap.attr,
+	&dev_attr_iface_discovery_auth_optional.attr,
+	&dev_attr_iface_discovery_logout.attr,
+	&dev_attr_iface_strict_login_comp_en.attr,
+	&dev_attr_iface_initiator_name.attr,
+	&dev_attr_ipv4_iface_dhcp_dns_address_en.attr,
+	&dev_attr_ipv4_iface_dhcp_slp_da_info_en.attr,
+	&dev_attr_ipv4_iface_tos_en.attr,
+	&dev_attr_ipv4_iface_tos.attr,
+	&dev_attr_ipv4_iface_grat_arp_en.attr,
+	&dev_attr_ipv4_iface_dhcp_alt_client_id_en.attr,
+	&dev_attr_ipv4_iface_dhcp_alt_client_id.attr,
+	&dev_attr_ipv4_iface_dhcp_req_vendor_id_en.attr,
+	&dev_attr_ipv4_iface_dhcp_use_vendor_id_en.attr,
+	&dev_attr_ipv4_iface_dhcp_vendor_id.attr,
+	&dev_attr_ipv4_iface_dhcp_learn_iqn_en.attr,
+	&dev_attr_ipv4_iface_fragment_disable.attr,
+	&dev_attr_ipv4_iface_incoming_forwarding_en.attr,
+	&dev_attr_ipv4_iface_ttl.attr,
+	&dev_attr_ipv6_iface_link_local_state.attr,
+	&dev_attr_ipv6_iface_router_state.attr,
+	&dev_attr_ipv6_iface_grat_neighbor_adv_en.attr,
+	&dev_attr_ipv6_iface_mld_en.attr,
+	&dev_attr_ipv6_iface_flow_label.attr,
+	&dev_attr_ipv6_iface_traffic_class.attr,
+	&dev_attr_ipv6_iface_hop_limit.attr,
+	&dev_attr_ipv6_iface_nd_reachable_tmo.attr,
+	&dev_attr_ipv6_iface_nd_rexmit_time.attr,
+	&dev_attr_ipv6_iface_nd_stale_tmo.attr,
+	&dev_attr_ipv6_iface_dup_addr_detect_cnt.attr,
+	&dev_attr_ipv6_iface_router_adv_link_mtu.attr,
 	NULL,
 };
 
@@ -404,6 +690,61 @@ static struct attribute_group iscsi_iface_group = {
 	.attrs = iscsi_iface_attrs,
 	.is_visible = iscsi_iface_attr_is_visible,
 };
+
+/* convert iscsi_ipaddress_state values to ascii string name */
+static const struct {
+	enum iscsi_ipaddress_state	value;
+	char				*name;
+} iscsi_ipaddress_state_names[] = {
+	{ISCSI_IPDDRESS_STATE_UNCONFIGURED,	"Unconfigured" },
+	{ISCSI_IPDDRESS_STATE_ACQUIRING,	"Acquiring" },
+	{ISCSI_IPDDRESS_STATE_TENTATIVE,	"Tentative" },
+	{ISCSI_IPDDRESS_STATE_VALID,		"Valid" },
+	{ISCSI_IPDDRESS_STATE_DISABLING,	"Disabling" },
+	{ISCSI_IPDDRESS_STATE_INVALID,		"Invalid" },
+	{ISCSI_IPDDRESS_STATE_DEPRECATED,	"Deprecated" },
+};
+
+char *iscsi_get_ipaddress_state_name(enum iscsi_ipaddress_state port_state)
+{
+	int i;
+	char *state = NULL;
+
+	for (i = 0; i < ARRAY_SIZE(iscsi_ipaddress_state_names); i++) {
+		if (iscsi_ipaddress_state_names[i].value == port_state) {
+			state = iscsi_ipaddress_state_names[i].name;
+			break;
+		}
+	}
+	return state;
+}
+EXPORT_SYMBOL_GPL(iscsi_get_ipaddress_state_name);
+
+/* convert iscsi_router_state values to ascii string name */
+static const struct {
+	enum iscsi_router_state	value;
+	char			*name;
+} iscsi_router_state_names[] = {
+	{ISCSI_ROUTER_STATE_UNKNOWN,		"Unknown" },
+	{ISCSI_ROUTER_STATE_ADVERTISED,		"Advertised" },
+	{ISCSI_ROUTER_STATE_MANUAL,		"Manual" },
+	{ISCSI_ROUTER_STATE_STALE,		"Stale" },
+};
+
+char *iscsi_get_router_state_name(enum iscsi_router_state router_state)
+{
+	int i;
+	char *state = NULL;
+
+	for (i = 0; i < ARRAY_SIZE(iscsi_router_state_names); i++) {
+		if (iscsi_router_state_names[i].value == router_state) {
+			state = iscsi_router_state_names[i].name;
+			break;
+		}
+	}
+	return state;
+}
+EXPORT_SYMBOL_GPL(iscsi_get_router_state_name);
 
 struct iscsi_iface *
 iscsi_create_iface(struct Scsi_Host *shost, struct iscsi_transport *transport,
@@ -892,7 +1233,7 @@ struct bus_type iscsi_flashnode_bus = {
  * Adds a sysfs entry for the flashnode session attributes
  *
  * Returns:
- *  pointer to allocated flashnode sess on sucess
+ *  pointer to allocated flashnode sess on success
  *  %NULL on failure
  */
 struct iscsi_bus_flash_session *
@@ -1090,7 +1431,7 @@ static int iscsi_iter_destroy_flashnode_conn_fn(struct device *dev, void *data)
 }
 
 /**
- * iscsi_destroy_flashnode_sess - destory flashnode session entry
+ * iscsi_destroy_flashnode_sess - destroy flashnode session entry
  * @fnode_sess: pointer to flashnode session entry to be destroyed
  *
  * Deletes the flashnode session entry and all children flashnode connection
@@ -1120,7 +1461,7 @@ static int iscsi_iter_destroy_flashnode_fn(struct device *dev, void *data)
 }
 
 /**
- * iscsi_destroy_all_flashnode - destory all flashnode session entries
+ * iscsi_destroy_all_flashnode - destroy all flashnode session entries
  * @shost: pointer to host data
  *
  * Destroys all the flashnode session entries and all corresponding children
@@ -1447,7 +1788,7 @@ EXPORT_SYMBOL_GPL(iscsi_scan_finished);
 struct iscsi_scan_data {
 	unsigned int channel;
 	unsigned int id;
-	unsigned int lun;
+	u64 lun;
 };
 
 static int iscsi_user_scan_session(struct device *dev, void *data)
@@ -1494,7 +1835,7 @@ user_scan_exit:
 }
 
 static int iscsi_user_scan(struct Scsi_Host *shost, uint channel,
-			   uint id, uint lun)
+			   uint id, u64 lun)
 {
 	struct iscsi_scan_data scan_data;
 
@@ -1677,7 +2018,7 @@ static void __iscsi_unbind_session(struct work_struct *work)
 	if (session->target_id == ISCSI_MAX_TARGET) {
 		spin_unlock_irqrestore(&session->lock, flags);
 		mutex_unlock(&ihost->mutex);
-		return;
+		goto unbind_session_exit;
 	}
 
 	target_id = session->target_id;
@@ -1689,6 +2030,8 @@ static void __iscsi_unbind_session(struct work_struct *work)
 		ida_simple_remove(&iscsi_sess_ida, target_id);
 
 	scsi_remove_target(&session->dev);
+
+unbind_session_exit:
 	iscsi_session_event(session, ISCSI_KEVENT_UNBIND_SESSION);
 	ISCSI_DBG_TRANS_SESSION(session, "Completed target removal\n");
 }
@@ -1707,6 +2050,7 @@ iscsi_alloc_session(struct Scsi_Host *shost, struct iscsi_transport *transport,
 	session->transport = transport;
 	session->creator = -1;
 	session->recovery_tmo = 120;
+	session->recovery_tmo_sysfs_override = false;
 	session->state = ISCSI_SESSION_FREE;
 	INIT_DELAYED_WORK(&session->recovery_work, session_recovery_timedout);
 	INIT_LIST_HEAD(&session->sess_list);
@@ -2443,6 +2787,9 @@ iscsi_set_param(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 	struct iscsi_cls_session *session;
 	int err = 0, value = 0;
 
+	if (ev->u.set_param.len > PAGE_SIZE)
+		return -EINVAL;
+
 	session = iscsi_session_lookup(ev->u.set_param.sid);
 	conn = iscsi_conn_lookup(ev->u.set_param.sid, ev->u.set_param.cid);
 	if (!conn || !session)
@@ -2451,7 +2798,8 @@ iscsi_set_param(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 	switch (ev->u.set_param.param) {
 	case ISCSI_PARAM_SESS_RECOVERY_TMO:
 		sscanf(data, "%d", &value);
-		session->recovery_tmo = value;
+		if (!session->recovery_tmo_sysfs_override)
+			session->recovery_tmo = value;
 		break;
 	default:
 		err = transport->set_param(conn, ev->u.set_param.param,
@@ -2589,6 +2937,9 @@ iscsi_set_host_param(struct iscsi_transport *transport,
 	if (!transport->set_host_param)
 		return -ENOSYS;
 
+	if (ev->u.set_host_param.len > PAGE_SIZE)
+		return -EINVAL;
+
 	shost = scsi_host_lookup(ev->u.set_host_param.host_no);
 	if (!shost) {
 		printk(KERN_ERR "set_host_param could not find host no %u\n",
@@ -2624,6 +2975,24 @@ iscsi_set_path(struct iscsi_transport *transport, struct iscsi_uevent *ev)
 
 	scsi_host_put(shost);
 	return err;
+}
+
+static int iscsi_session_has_conns(int sid)
+{
+	struct iscsi_cls_conn *conn;
+	unsigned long flags;
+	int found = 0;
+
+	spin_lock_irqsave(&connlock, flags);
+	list_for_each_entry(conn, &connlist, conn_list) {
+		if (iscsi_conn_get_sid(conn) == sid) {
+			found = 1;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&connlock, flags);
+
+	return found;
 }
 
 static int
@@ -2702,7 +3071,7 @@ iscsi_get_chap(struct iscsi_transport *transport, struct nlmsghdr *nlh)
 
 	shost = scsi_host_lookup(ev->u.get_chap.host_no);
 	if (!shost) {
-		printk(KERN_ERR "%s: failed. Cound not find host no %u\n",
+		printk(KERN_ERR "%s: failed. Could not find host no %u\n",
 		       __func__, ev->u.get_chap.host_no);
 		return -ENODEV;
 	}
@@ -2726,7 +3095,7 @@ iscsi_get_chap(struct iscsi_transport *transport, struct nlmsghdr *nlh)
 		evchap->u.get_chap.host_no = ev->u.get_chap.host_no;
 		evchap->u.get_chap.chap_tbl_idx = ev->u.get_chap.chap_tbl_idx;
 		evchap->u.get_chap.num_entries = ev->u.get_chap.num_entries;
-		buf = (char *) ((char *)evchap + sizeof(*evchap));
+		buf = (char *)evchap + sizeof(*evchap);
 		memset(buf, 0, chap_buf_size);
 
 		err = transport->get_chap(shost, ev->u.get_chap.chap_tbl_idx,
@@ -2741,6 +3110,28 @@ iscsi_get_chap(struct iscsi_transport *transport, struct nlmsghdr *nlh)
 	} while (err < 0 && err != -ECONNREFUSED);
 
 exit_get_chap:
+	scsi_host_put(shost);
+	return err;
+}
+
+static int iscsi_set_chap(struct iscsi_transport *transport,
+			  struct iscsi_uevent *ev, uint32_t len)
+{
+	char *data = (char *)ev + sizeof(*ev);
+	struct Scsi_Host *shost;
+	int err = 0;
+
+	if (!transport->set_chap)
+		return -ENOSYS;
+
+	shost = scsi_host_lookup(ev->u.set_path.host_no);
+	if (!shost) {
+		pr_err("%s could not find host no %u\n",
+		       __func__, ev->u.set_path.host_no);
+		return -ENODEV;
+	}
+
+	err = transport->set_chap(shost, data, len);
 	scsi_host_put(shost);
 	return err;
 }
@@ -2811,7 +3202,7 @@ static int iscsi_set_flashnode_param(struct iscsi_transport *transport,
 		pr_err("%s could not find host no %u\n",
 		       __func__, ev->u.set_flashnode.host_no);
 		err = -ENODEV;
-		goto put_host;
+		goto exit_set_fnode;
 	}
 
 	idx = ev->u.set_flashnode.flashnode_idx;
@@ -3061,15 +3452,90 @@ exit_logout_sid:
 }
 
 static int
+iscsi_get_host_stats(struct iscsi_transport *transport, struct nlmsghdr *nlh)
+{
+	struct iscsi_uevent *ev = nlmsg_data(nlh);
+	struct Scsi_Host *shost = NULL;
+	struct iscsi_internal *priv;
+	struct sk_buff *skbhost_stats;
+	struct nlmsghdr *nlhhost_stats;
+	struct iscsi_uevent *evhost_stats;
+	int host_stats_size = 0;
+	int len, err = 0;
+	char *buf;
+
+	if (!transport->get_host_stats)
+		return -ENOSYS;
+
+	priv = iscsi_if_transport_lookup(transport);
+	if (!priv)
+		return -EINVAL;
+
+	host_stats_size = sizeof(struct iscsi_offload_host_stats);
+	len = nlmsg_total_size(sizeof(*ev) + host_stats_size);
+
+	shost = scsi_host_lookup(ev->u.get_host_stats.host_no);
+	if (!shost) {
+		pr_err("%s: failed. Cound not find host no %u\n",
+		       __func__, ev->u.get_host_stats.host_no);
+		return -ENODEV;
+	}
+
+	do {
+		int actual_size;
+
+		skbhost_stats = alloc_skb(len, GFP_KERNEL);
+		if (!skbhost_stats) {
+			pr_err("cannot deliver host stats: OOM\n");
+			err = -ENOMEM;
+			goto exit_host_stats;
+		}
+
+		nlhhost_stats = __nlmsg_put(skbhost_stats, 0, 0, 0,
+				      (len - sizeof(*nlhhost_stats)), 0);
+		evhost_stats = nlmsg_data(nlhhost_stats);
+		memset(evhost_stats, 0, sizeof(*evhost_stats));
+		evhost_stats->transport_handle = iscsi_handle(transport);
+		evhost_stats->type = nlh->nlmsg_type;
+		evhost_stats->u.get_host_stats.host_no =
+					ev->u.get_host_stats.host_no;
+		buf = (char *)evhost_stats + sizeof(*evhost_stats);
+		memset(buf, 0, host_stats_size);
+
+		err = transport->get_host_stats(shost, buf, host_stats_size);
+		if (err) {
+			kfree_skb(skbhost_stats);
+			goto exit_host_stats;
+		}
+
+		actual_size = nlmsg_total_size(sizeof(*ev) + host_stats_size);
+		skb_trim(skbhost_stats, NLMSG_ALIGN(actual_size));
+		nlhhost_stats->nlmsg_len = actual_size;
+
+		err = iscsi_multicast_skb(skbhost_stats, ISCSI_NL_GRP_ISCSID,
+					  GFP_KERNEL);
+	} while (err < 0 && err != -ECONNREFUSED);
+
+exit_host_stats:
+	scsi_host_put(shost);
+	return err;
+}
+
+
+static int
 iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 {
 	int err = 0;
+	u32 pdu_len;
 	struct iscsi_uevent *ev = nlmsg_data(nlh);
 	struct iscsi_transport *transport = NULL;
 	struct iscsi_internal *priv;
 	struct iscsi_cls_session *session;
 	struct iscsi_cls_conn *conn;
 	struct iscsi_endpoint *ep = NULL;
+
+	if (!netlink_capable(skb, CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (nlh->nlmsg_type == ISCSI_UEVENT_PATH_UPDATE)
 		*group = ISCSI_NL_GRP_UIP;
@@ -3107,10 +3573,12 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 		break;
 	case ISCSI_UEVENT_DESTROY_SESSION:
 		session = iscsi_session_lookup(ev->u.d_session.sid);
-		if (session)
-			transport->destroy_session(session);
-		else
+		if (!session)
 			err = -EINVAL;
+		else if (iscsi_session_has_conns(ev->u.d_session.sid))
+			err = -EBUSY;
+		else
+			transport->destroy_session(session);
 		break;
 	case ISCSI_UEVENT_UNBIND_SESSION:
 		session = iscsi_session_lookup(ev->u.d_session.sid);
@@ -3174,6 +3642,14 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 			err = -EINVAL;
 		break;
 	case ISCSI_UEVENT_SEND_PDU:
+		pdu_len = nlh->nlmsg_len - sizeof(*nlh) - sizeof(*ev);
+
+		if ((ev->u.send_pdu.hdr_size > pdu_len) ||
+		    (ev->u.send_pdu.data_size > (pdu_len - ev->u.send_pdu.hdr_size))) {
+			err = -EINVAL;
+			break;
+		}
+
 		conn = iscsi_conn_lookup(ev->u.send_pdu.sid, ev->u.send_pdu.cid);
 		if (conn)
 			ev->r.retcode =	transport->send_pdu(conn,
@@ -3235,6 +3711,13 @@ iscsi_if_recv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, uint32_t *group)
 	case ISCSI_UEVENT_LOGOUT_FLASHNODE_SID:
 		err = iscsi_logout_flashnode_sid(transport, ev);
 		break;
+	case ISCSI_UEVENT_SET_CHAP:
+		err = iscsi_set_chap(transport, ev,
+				     nlmsg_attrlen(nlh, sizeof(*ev)));
+		break;
+	case ISCSI_UEVENT_GET_HOST_STATS:
+		err = iscsi_get_host_stats(transport, nlh);
+		break;
 	default:
 		err = -ENOSYS;
 		break;
@@ -3258,9 +3741,10 @@ iscsi_if_rx(struct sk_buff *skb)
 		struct nlmsghdr	*nlh;
 		struct iscsi_uevent *ev;
 		uint32_t group;
+		int retries = ISCSI_SEND_MAX_ALLOWED;
 
 		nlh = nlmsg_hdr(skb);
-		if (nlh->nlmsg_len < sizeof(*nlh) ||
+		if (nlh->nlmsg_len < sizeof(*nlh) + sizeof(*ev) ||
 		    skb->len < nlh->nlmsg_len) {
 			break;
 		}
@@ -3288,6 +3772,10 @@ iscsi_if_rx(struct sk_buff *skb)
 				break;
 			err = iscsi_if_send_reply(group, nlh->nlmsg_seq,
 				nlh->nlmsg_type, 0, 0, ev, sizeof(*ev));
+			if (err == -EAGAIN && --retries < 0) {
+				printk(KERN_WARNING "Send reply failed, error %d\n", err);
+				break;
+			}
 		} while (err < 0 && err != -ECONNREFUSED && err != -ESRCH);
 		skb_pull(skb, rlen);
 	}
@@ -3327,6 +3815,24 @@ iscsi_conn_attr(exp_statsn, ISCSI_PARAM_EXP_STATSN);
 iscsi_conn_attr(persistent_address, ISCSI_PARAM_PERSISTENT_ADDRESS);
 iscsi_conn_attr(ping_tmo, ISCSI_PARAM_PING_TMO);
 iscsi_conn_attr(recv_tmo, ISCSI_PARAM_RECV_TMO);
+iscsi_conn_attr(local_port, ISCSI_PARAM_LOCAL_PORT);
+iscsi_conn_attr(statsn, ISCSI_PARAM_STATSN);
+iscsi_conn_attr(keepalive_tmo, ISCSI_PARAM_KEEPALIVE_TMO);
+iscsi_conn_attr(max_segment_size, ISCSI_PARAM_MAX_SEGMENT_SIZE);
+iscsi_conn_attr(tcp_timestamp_stat, ISCSI_PARAM_TCP_TIMESTAMP_STAT);
+iscsi_conn_attr(tcp_wsf_disable, ISCSI_PARAM_TCP_WSF_DISABLE);
+iscsi_conn_attr(tcp_nagle_disable, ISCSI_PARAM_TCP_NAGLE_DISABLE);
+iscsi_conn_attr(tcp_timer_scale, ISCSI_PARAM_TCP_TIMER_SCALE);
+iscsi_conn_attr(tcp_timestamp_enable, ISCSI_PARAM_TCP_TIMESTAMP_EN);
+iscsi_conn_attr(fragment_disable, ISCSI_PARAM_IP_FRAGMENT_DISABLE);
+iscsi_conn_attr(ipv4_tos, ISCSI_PARAM_IPV4_TOS);
+iscsi_conn_attr(ipv6_traffic_class, ISCSI_PARAM_IPV6_TC);
+iscsi_conn_attr(ipv6_flow_label, ISCSI_PARAM_IPV6_FLOW_LABEL);
+iscsi_conn_attr(is_fw_assigned_ipv6, ISCSI_PARAM_IS_FW_ASSIGNED_IPV6);
+iscsi_conn_attr(tcp_xmit_wsf, ISCSI_PARAM_TCP_XMIT_WSF);
+iscsi_conn_attr(tcp_recv_wsf, ISCSI_PARAM_TCP_RECV_WSF);
+iscsi_conn_attr(local_ipaddr, ISCSI_PARAM_LOCAL_IPADDR);
+
 
 #define iscsi_conn_ep_attr_show(param)					\
 static ssize_t show_conn_ep_param_##param(struct device *dev,		\
@@ -3379,6 +3885,23 @@ static struct attribute *iscsi_conn_attrs[] = {
 	&dev_attr_conn_persistent_port.attr,
 	&dev_attr_conn_ping_tmo.attr,
 	&dev_attr_conn_recv_tmo.attr,
+	&dev_attr_conn_local_port.attr,
+	&dev_attr_conn_statsn.attr,
+	&dev_attr_conn_keepalive_tmo.attr,
+	&dev_attr_conn_max_segment_size.attr,
+	&dev_attr_conn_tcp_timestamp_stat.attr,
+	&dev_attr_conn_tcp_wsf_disable.attr,
+	&dev_attr_conn_tcp_nagle_disable.attr,
+	&dev_attr_conn_tcp_timer_scale.attr,
+	&dev_attr_conn_tcp_timestamp_enable.attr,
+	&dev_attr_conn_fragment_disable.attr,
+	&dev_attr_conn_ipv4_tos.attr,
+	&dev_attr_conn_ipv6_traffic_class.attr,
+	&dev_attr_conn_ipv6_flow_label.attr,
+	&dev_attr_conn_is_fw_assigned_ipv6.attr,
+	&dev_attr_conn_tcp_xmit_wsf.attr,
+	&dev_attr_conn_tcp_recv_wsf.attr,
+	&dev_attr_conn_local_ipaddr.attr,
 	NULL,
 };
 
@@ -3416,6 +3939,40 @@ static umode_t iscsi_conn_attr_is_visible(struct kobject *kobj,
 		param = ISCSI_PARAM_PING_TMO;
 	else if (attr == &dev_attr_conn_recv_tmo.attr)
 		param = ISCSI_PARAM_RECV_TMO;
+	else if (attr == &dev_attr_conn_local_port.attr)
+		param = ISCSI_PARAM_LOCAL_PORT;
+	else if (attr == &dev_attr_conn_statsn.attr)
+		param = ISCSI_PARAM_STATSN;
+	else if (attr == &dev_attr_conn_keepalive_tmo.attr)
+		param = ISCSI_PARAM_KEEPALIVE_TMO;
+	else if (attr == &dev_attr_conn_max_segment_size.attr)
+		param = ISCSI_PARAM_MAX_SEGMENT_SIZE;
+	else if (attr == &dev_attr_conn_tcp_timestamp_stat.attr)
+		param = ISCSI_PARAM_TCP_TIMESTAMP_STAT;
+	else if (attr == &dev_attr_conn_tcp_wsf_disable.attr)
+		param = ISCSI_PARAM_TCP_WSF_DISABLE;
+	else if (attr == &dev_attr_conn_tcp_nagle_disable.attr)
+		param = ISCSI_PARAM_TCP_NAGLE_DISABLE;
+	else if (attr == &dev_attr_conn_tcp_timer_scale.attr)
+		param = ISCSI_PARAM_TCP_TIMER_SCALE;
+	else if (attr == &dev_attr_conn_tcp_timestamp_enable.attr)
+		param = ISCSI_PARAM_TCP_TIMESTAMP_EN;
+	else if (attr == &dev_attr_conn_fragment_disable.attr)
+		param = ISCSI_PARAM_IP_FRAGMENT_DISABLE;
+	else if (attr == &dev_attr_conn_ipv4_tos.attr)
+		param = ISCSI_PARAM_IPV4_TOS;
+	else if (attr == &dev_attr_conn_ipv6_traffic_class.attr)
+		param = ISCSI_PARAM_IPV6_TC;
+	else if (attr == &dev_attr_conn_ipv6_flow_label.attr)
+		param = ISCSI_PARAM_IPV6_FLOW_LABEL;
+	else if (attr == &dev_attr_conn_is_fw_assigned_ipv6.attr)
+		param = ISCSI_PARAM_IS_FW_ASSIGNED_IPV6;
+	else if (attr == &dev_attr_conn_tcp_xmit_wsf.attr)
+		param = ISCSI_PARAM_TCP_XMIT_WSF;
+	else if (attr == &dev_attr_conn_tcp_recv_wsf.attr)
+		param = ISCSI_PARAM_TCP_RECV_WSF;
+	else if (attr == &dev_attr_conn_local_ipaddr.attr)
+		param = ISCSI_PARAM_LOCAL_IPADDR;
 	else {
 		WARN_ONCE(1, "Invalid conn attr");
 		return 0;
@@ -3473,13 +4030,31 @@ iscsi_session_attr(tgt_reset_tmo, ISCSI_PARAM_TGT_RESET_TMO, 0);
 iscsi_session_attr(ifacename, ISCSI_PARAM_IFACE_NAME, 0);
 iscsi_session_attr(initiatorname, ISCSI_PARAM_INITIATOR_NAME, 0);
 iscsi_session_attr(targetalias, ISCSI_PARAM_TARGET_ALIAS, 0);
+iscsi_session_attr(boot_root, ISCSI_PARAM_BOOT_ROOT, 0);
+iscsi_session_attr(boot_nic, ISCSI_PARAM_BOOT_NIC, 0);
+iscsi_session_attr(boot_target, ISCSI_PARAM_BOOT_TARGET, 0);
+iscsi_session_attr(auto_snd_tgt_disable, ISCSI_PARAM_AUTO_SND_TGT_DISABLE, 0);
+iscsi_session_attr(discovery_session, ISCSI_PARAM_DISCOVERY_SESS, 0);
+iscsi_session_attr(portal_type, ISCSI_PARAM_PORTAL_TYPE, 0);
+iscsi_session_attr(chap_auth, ISCSI_PARAM_CHAP_AUTH_EN, 0);
+iscsi_session_attr(discovery_logout, ISCSI_PARAM_DISCOVERY_LOGOUT_EN, 0);
+iscsi_session_attr(bidi_chap, ISCSI_PARAM_BIDI_CHAP_EN, 0);
+iscsi_session_attr(discovery_auth_optional,
+		   ISCSI_PARAM_DISCOVERY_AUTH_OPTIONAL, 0);
+iscsi_session_attr(def_time2wait, ISCSI_PARAM_DEF_TIME2WAIT, 0);
+iscsi_session_attr(def_time2retain, ISCSI_PARAM_DEF_TIME2RETAIN, 0);
+iscsi_session_attr(isid, ISCSI_PARAM_ISID, 0);
+iscsi_session_attr(tsid, ISCSI_PARAM_TSID, 0);
+iscsi_session_attr(def_taskmgmt_tmo, ISCSI_PARAM_DEF_TASKMGMT_TMO, 0);
+iscsi_session_attr(discovery_parent_idx, ISCSI_PARAM_DISCOVERY_PARENT_IDX, 0);
+iscsi_session_attr(discovery_parent_type, ISCSI_PARAM_DISCOVERY_PARENT_TYPE, 0);
 
 static ssize_t
 show_priv_session_state(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct iscsi_cls_session *session = iscsi_dev_to_session(dev->parent);
-	return sprintf(buf, "%s\n", iscsi_session_state_name(session->state));
+	return sysfs_emit(buf, "%s\n", iscsi_session_state_name(session->state));
 }
 static ISCSI_CLASS_ATTR(priv_sess, state, S_IRUGO, show_priv_session_state,
 			NULL);
@@ -3488,7 +4063,7 @@ show_priv_session_creator(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct iscsi_cls_session *session = iscsi_dev_to_session(dev->parent);
-	return sprintf(buf, "%d\n", session->creator);
+	return sysfs_emit(buf, "%d\n", session->creator);
 }
 static ISCSI_CLASS_ATTR(priv_sess, creator, S_IRUGO, show_priv_session_creator,
 			NULL);
@@ -3497,7 +4072,7 @@ show_priv_session_target_id(struct device *dev, struct device_attribute *attr,
 			    char *buf)
 {
 	struct iscsi_cls_session *session = iscsi_dev_to_session(dev->parent);
-	return sprintf(buf, "%d\n", session->target_id);
+	return sysfs_emit(buf, "%d\n", session->target_id);
 }
 static ISCSI_CLASS_ATTR(priv_sess, target_id, S_IRUGO,
 			show_priv_session_target_id, NULL);
@@ -3510,8 +4085,8 @@ show_priv_session_##field(struct device *dev, 				\
 	struct iscsi_cls_session *session = 				\
 			iscsi_dev_to_session(dev->parent);		\
 	if (session->field == -1)					\
-		return sprintf(buf, "off\n");				\
-	return sprintf(buf, format"\n", session->field);		\
+		return sysfs_emit(buf, "off\n");			\
+	return sysfs_emit(buf, format"\n", session->field);		\
 }
 
 #define iscsi_priv_session_attr_store(field)				\
@@ -3527,13 +4102,15 @@ store_priv_session_##field(struct device *dev,				\
 	if ((session->state == ISCSI_SESSION_FREE) ||			\
 	    (session->state == ISCSI_SESSION_FAILED))			\
 		return -EBUSY;						\
-	if (strncmp(buf, "off", 3) == 0)				\
+	if (strncmp(buf, "off", 3) == 0) {				\
 		session->field = -1;					\
-	else {								\
+		session->field##_sysfs_override = true;			\
+	} else {							\
 		val = simple_strtoul(buf, &cp, 0);			\
 		if (*cp != '\0' && *cp != '\n')				\
 			return -EINVAL;					\
 		session->field = val;					\
+		session->field##_sysfs_override = true;			\
 	}								\
 	return count;							\
 }
@@ -3544,6 +4121,7 @@ store_priv_session_##field(struct device *dev,				\
 static ISCSI_CLASS_ATTR(priv_sess, field, S_IRUGO | S_IWUSR,		\
 			show_priv_session_##field,			\
 			store_priv_session_##field)
+
 iscsi_priv_session_rw_attr(recovery_tmo, "%d");
 
 static struct attribute *iscsi_session_attrs[] = {
@@ -3568,12 +4146,29 @@ static struct attribute *iscsi_session_attrs[] = {
 	&dev_attr_sess_ifacename.attr,
 	&dev_attr_sess_initiatorname.attr,
 	&dev_attr_sess_targetalias.attr,
+	&dev_attr_sess_boot_root.attr,
+	&dev_attr_sess_boot_nic.attr,
+	&dev_attr_sess_boot_target.attr,
 	&dev_attr_priv_sess_recovery_tmo.attr,
 	&dev_attr_priv_sess_state.attr,
 	&dev_attr_priv_sess_creator.attr,
 	&dev_attr_sess_chap_out_idx.attr,
 	&dev_attr_sess_chap_in_idx.attr,
 	&dev_attr_priv_sess_target_id.attr,
+	&dev_attr_sess_auto_snd_tgt_disable.attr,
+	&dev_attr_sess_discovery_session.attr,
+	&dev_attr_sess_portal_type.attr,
+	&dev_attr_sess_chap_auth.attr,
+	&dev_attr_sess_discovery_logout.attr,
+	&dev_attr_sess_bidi_chap.attr,
+	&dev_attr_sess_discovery_auth_optional.attr,
+	&dev_attr_sess_def_time2wait.attr,
+	&dev_attr_sess_def_time2retain.attr,
+	&dev_attr_sess_isid.attr,
+	&dev_attr_sess_tsid.attr,
+	&dev_attr_sess_def_taskmgmt_tmo.attr,
+	&dev_attr_sess_discovery_parent_idx.attr,
+	&dev_attr_sess_discovery_parent_type.attr,
 	NULL,
 };
 
@@ -3631,6 +4226,40 @@ static umode_t iscsi_session_attr_is_visible(struct kobject *kobj,
 		param = ISCSI_PARAM_INITIATOR_NAME;
 	else if (attr == &dev_attr_sess_targetalias.attr)
 		param = ISCSI_PARAM_TARGET_ALIAS;
+	else if (attr == &dev_attr_sess_boot_root.attr)
+		param = ISCSI_PARAM_BOOT_ROOT;
+	else if (attr == &dev_attr_sess_boot_nic.attr)
+		param = ISCSI_PARAM_BOOT_NIC;
+	else if (attr == &dev_attr_sess_boot_target.attr)
+		param = ISCSI_PARAM_BOOT_TARGET;
+	else if (attr == &dev_attr_sess_auto_snd_tgt_disable.attr)
+		param = ISCSI_PARAM_AUTO_SND_TGT_DISABLE;
+	else if (attr == &dev_attr_sess_discovery_session.attr)
+		param = ISCSI_PARAM_DISCOVERY_SESS;
+	else if (attr == &dev_attr_sess_portal_type.attr)
+		param = ISCSI_PARAM_PORTAL_TYPE;
+	else if (attr == &dev_attr_sess_chap_auth.attr)
+		param = ISCSI_PARAM_CHAP_AUTH_EN;
+	else if (attr == &dev_attr_sess_discovery_logout.attr)
+		param = ISCSI_PARAM_DISCOVERY_LOGOUT_EN;
+	else if (attr == &dev_attr_sess_bidi_chap.attr)
+		param = ISCSI_PARAM_BIDI_CHAP_EN;
+	else if (attr == &dev_attr_sess_discovery_auth_optional.attr)
+		param = ISCSI_PARAM_DISCOVERY_AUTH_OPTIONAL;
+	else if (attr == &dev_attr_sess_def_time2wait.attr)
+		param = ISCSI_PARAM_DEF_TIME2WAIT;
+	else if (attr == &dev_attr_sess_def_time2retain.attr)
+		param = ISCSI_PARAM_DEF_TIME2RETAIN;
+	else if (attr == &dev_attr_sess_isid.attr)
+		param = ISCSI_PARAM_ISID;
+	else if (attr == &dev_attr_sess_tsid.attr)
+		param = ISCSI_PARAM_TSID;
+	else if (attr == &dev_attr_sess_def_taskmgmt_tmo.attr)
+		param = ISCSI_PARAM_DEF_TASKMGMT_TMO;
+	else if (attr == &dev_attr_sess_discovery_parent_idx.attr)
+		param = ISCSI_PARAM_DISCOVERY_PARENT_IDX;
+	else if (attr == &dev_attr_sess_discovery_parent_type.attr)
+		param = ISCSI_PARAM_DISCOVERY_PARENT_TYPE;
 	else if (attr == &dev_attr_priv_sess_recovery_tmo.attr)
 		return S_IRUGO | S_IWUSR;
 	else if (attr == &dev_attr_priv_sess_state.attr)

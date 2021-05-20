@@ -98,7 +98,7 @@ static void holtekff_send(struct holtekff_device *holtekff,
 		holtekff->field->value[i] = data[i];
 	}
 
-	dbg_hid("sending %*ph\n", 7, data);
+	dbg_hid("sending %7ph\n", data);
 
 	hid_hw_request(hid, holtekff->field->report, HID_REQ_SET_REPORT);
 }
@@ -140,12 +140,18 @@ static int holtekff_init(struct hid_device *hid)
 {
 	struct holtekff_device *holtekff;
 	struct hid_report *report;
-	struct hid_input *hidinput = list_entry(hid->inputs.next,
-						struct hid_input, list);
+	struct hid_input *hidinput;
 	struct list_head *report_list =
 			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
-	struct input_dev *dev = hidinput->input;
+	struct input_dev *dev;
 	int error;
+
+	if (list_empty(&hid->inputs)) {
+		hid_err(hid, "no inputs found\n");
+		return -ENODEV;
+	}
+	hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+	dev = hidinput->input;
 
 	if (list_empty(report_list)) {
 		hid_err(hid, "no output report found\n");

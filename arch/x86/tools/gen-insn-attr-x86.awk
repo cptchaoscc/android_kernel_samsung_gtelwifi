@@ -68,7 +68,7 @@ BEGIN {
 
 	lprefix1_expr = "\\((66|!F3)\\)"
 	lprefix2_expr = "\\(F3\\)"
-	lprefix3_expr = "\\((F2|!F3)\\)"
+	lprefix3_expr = "\\((F2|!F3|66&F2)\\)"
 	lprefix_expr = "\\((66|F2|F3)\\)"
 	max_lprefix = 4
 
@@ -83,6 +83,8 @@ BEGIN {
 	prefix_num["Operand-Size"] = "INAT_PFX_OPNDSZ"
 	prefix_num["REPNE"] = "INAT_PFX_REPNE"
 	prefix_num["REP/REPE"] = "INAT_PFX_REPE"
+	prefix_num["XACQUIRE"] = "INAT_PFX_REPNE"
+	prefix_num["XRELEASE"] = "INAT_PFX_REPE"
 	prefix_num["LOCK"] = "INAT_PFX_LOCK"
 	prefix_num["SEG=CS"] = "INAT_PFX_CS"
 	prefix_num["SEG=DS"] = "INAT_PFX_DS"
@@ -251,7 +253,7 @@ function convert_operands(count,opnd,       i,j,imm,mod)
 	return add_flags(imm, mod)
 }
 
-/^[0-9a-f]+\:/ {
+/^[0-9a-f]+:/ {
 	if (NR == 1)
 		next
 	# get index

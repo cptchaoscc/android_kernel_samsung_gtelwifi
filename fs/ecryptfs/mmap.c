@@ -66,35 +66,6 @@ static int ecryptfs_writepage(struct page *page, struct writeback_control *wbc)
 {
 	int rc;
 
-    // WTL_EDM_START
-    /* MDM 3.1 START */
-    struct inode *inode;
-    struct ecryptfs_crypt_stat *crypt_stat;
-
-    inode = page->mapping->host;
-    crypt_stat = &ecryptfs_inode_to_private(inode)->crypt_stat;
-    if (!(crypt_stat->flags & ECRYPTFS_ENCRYPTED)) {
-	    size_t size;
-	    loff_t file_size = i_size_read(inode);
-	    pgoff_t end_page_index = file_size >> PAGE_CACHE_SHIFT;
-		if (end_page_index < page->index)
-			size = 0;
-		else if (end_page_index == page->index)
-			size = file_size & ~PAGE_CACHE_MASK;
-		else
-			size = PAGE_CACHE_SIZE;
-
-		rc = ecryptfs_write_lower_page_segment(inode, page, 0, size);
-		if (unlikely(rc)) {
-			ecryptfs_printk(KERN_WARNING, "Error write ""page (upper index [0x%.16lx])\n", page->index);
-			ClearPageUptodate(page);
-		} else
-			SetPageUptodate(page);
-		goto out;
-    }
-    /* MDM 3.1 END */
-    // WTL_EDM_END
-
 	rc = ecryptfs_encrypt_page(page);
 	if (rc) {
 		ecryptfs_printk(KERN_WARNING, "Error encrypting "
@@ -328,7 +299,7 @@ static int ecryptfs_write_begin(struct file *file,
 			rc = ecryptfs_read_lower_page_segment(
 				page, index, 0, PAGE_CACHE_SIZE, mapping->host);
 			if (rc) {
-				printk(KERN_ERR "%s: Error attemping to read "
+				printk(KERN_ERR "%s: Error attempting to read "
 				       "lower page segment; rc = [%d]\n",
 				       __func__, rc);
 				ClearPageUptodate(page);
@@ -448,8 +419,8 @@ static int ecryptfs_write_inode_size_to_xattr(struct inode *ecryptfs_inode)
 	ssize_t size;
 	void *xattr_virt;
 	struct dentry *lower_dentry =
-		ecryptfs_inode_to_private(ecryptfs_inode)->lower_file->f_dentry;
-	struct inode *lower_inode = lower_dentry->d_inode;
+		ecryptfs_inode_to_private(ecryptfs_inode)->lower_file->f_path.dentry;
+	struct inode *lower_inode = d_inode(lower_dentry);
 	int rc;
 
 	if (!lower_inode->i_op->getxattr || !lower_inode->i_op->setxattr) {

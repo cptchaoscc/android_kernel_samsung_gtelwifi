@@ -106,7 +106,8 @@ static const char * card_names[] = {
 	"SiS 900 PCI Fast Ethernet",
 	"SiS 7016 PCI Fast Ethernet"
 };
-static DEFINE_PCI_DEVICE_TABLE(sis900_pci_tbl) = {
+
+static const struct pci_device_id sis900_pci_tbl[] = {
 	{PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_900,
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, SIS_900},
 	{PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_7016,
@@ -576,7 +577,6 @@ err_unmap_tx:
 err_out_unmap:
 	pci_iounmap(pci_dev, ioaddr);
 err_out_cleardev:
-	pci_set_drvdata(pci_dev, NULL);
 	pci_release_regions(pci_dev);
  err_out:
 	free_netdev(net_dev);
@@ -1058,7 +1058,7 @@ sis900_open(struct net_device *net_dev)
 	sis900_set_mode(sis_priv, HW_SPEED_10_MBPS, FDX_CAPABLE_HALF_SELECTED);
 
 	/* Enable all known interrupts by setting the interrupt mask. */
-	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE);
+	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE | TxDESC);
 	sw32(cr, RxENA | sr32(cr));
 	sw32(ier, IE);
 
@@ -1309,22 +1309,8 @@ static void sis900_timer(unsigned long data)
 	struct sis900_private *sis_priv = netdev_priv(net_dev);
 	struct mii_phy *mii_phy = sis_priv->mii;
 	static const int next_tick = 5*HZ;
+	int speed = 0, duplex = 0;
 	u16 status;
-
-	if (!sis_priv->autong_complete){
-		int uninitialized_var(speed), duplex = 0;
-
-		sis900_read_mode(net_dev, &speed, &duplex);
-		if (duplex){
-			sis900_set_mode(sis_priv, speed, duplex);
-			sis630_set_eq(net_dev, sis_priv->chipset_rev);
-			netif_start_queue(net_dev);
-		}
-
-		sis_priv->timer.expires = jiffies + HZ;
-		add_timer(&sis_priv->timer);
-		return;
-	}
 
 	status = mdio_read(net_dev, sis_priv->cur_phy, MII_STATUS);
 	status = mdio_read(net_dev, sis_priv->cur_phy, MII_STATUS);
@@ -1336,9 +1322,15 @@ static void sis900_timer(unsigned long data)
 		status = sis900_default_phy(net_dev);
 		mii_phy = sis_priv->mii;
 
-		if (status & MII_STAT_LINK){
-			sis900_check_mode(net_dev, mii_phy);
-			netif_carrier_on(net_dev);
+		if (status & MII_STAT_LINK) {
+			WARN_ON(!(status & MII_STAT_AUTO_DONE));
+
+			sis900_read_mode(net_dev, &speed, &duplex);
+			if (duplex) {
+				sis900_set_mode(sis_priv, speed, duplex);
+				sis630_set_eq(net_dev, sis_priv->chipset_rev);
+				netif_carrier_on(net_dev);
+			}
 		}
 	} else {
 	/* Link ON -> OFF */
@@ -1589,7 +1581,7 @@ static void sis900_tx_timeout(struct net_device *net_dev)
 	sw32(txdp, sis_priv->tx_ring_dma);
 
 	/* Enable all known interrupts by setting the interrupt mask. */
-	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE);
+	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE | TxDESC);
 }
 
 /**
@@ -1612,12 +1604,6 @@ sis900_start_xmit(struct sk_buff *skb, struct net_device *net_dev)
 	unsigned int  index_cur_tx, index_dirty_tx;
 	unsigned int  count_dirty_tx;
 
-	/* Don't transmit data before the complete of auto-negotiation */
-	if(!sis_priv->autong_complete){
-		netif_stop_queue(net_dev);
-		return NETDEV_TX_BUSY;
-	}
-
 	spin_lock_irqsave(&sis_priv->lock, flags);
 
 	/* Calculate the next Tx descriptor entry. */
@@ -1629,13 +1615,13 @@ sis900_start_xmit(struct sk_buff *skb, struct net_device *net_dev)
 		skb->data, skb->len, PCI_DMA_TODEVICE);
 	if (unlikely(pci_dma_mapping_error(sis_priv->pci_dev,
 		sis_priv->tx_ring[entry].bufptr))) {
-			dev_kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 			sis_priv->tx_skbuff[entry] = NULL;
 			net_dev->stats.tx_dropped++;
 			spin_unlock_irqrestore(&sis_priv->lock, flags);
 			return NETDEV_TX_OK;
 	}
-	sis_priv->tx_ring[entry].cmdsts = (OWN | skb->len);
+	sis_priv->tx_ring[entry].cmdsts = (OWN | INTR | skb->len);
 	sw32(cr, TxENA | sr32(cr));
 
 	sis_priv->cur_tx ++;
@@ -1691,7 +1677,7 @@ static irqreturn_t sis900_interrupt(int irq, void *dev_instance)
 	do {
 		status = sr32(isr);
 
-		if ((status & (HIBERR|TxURN|TxERR|TxIDLE|RxORN|RxERR|RxOK)) == 0)
+		if ((status & (HIBERR|TxURN|TxERR|TxIDLE|TxDESC|RxORN|RxERR|RxOK)) == 0)
 			/* nothing intresting happened */
 			break;
 		handled = 1;
@@ -1701,7 +1687,7 @@ static irqreturn_t sis900_interrupt(int irq, void *dev_instance)
 			/* Rx interrupt */
 			sis900_rx(net_dev);
 
-		if (status & (TxURN | TxERR | TxIDLE))
+		if (status & (TxURN | TxERR | TxIDLE | TxDESC))
 			/* Tx interrupt */
 			sis900_finish_xmit(net_dev);
 
@@ -1723,7 +1709,7 @@ static irqreturn_t sis900_interrupt(int irq, void *dev_instance)
 
 	if(netif_msg_intr(sis_priv))
 		printk(KERN_DEBUG "%s: exiting interrupt, "
-		       "interrupt status = 0x%#8.8x.\n",
+		       "interrupt status = %#8.8x\n",
 		       net_dev->name, sr32(isr));
 
 	spin_unlock (&sis_priv->lock);
@@ -1913,8 +1899,8 @@ static void sis900_finish_xmit (struct net_device *net_dev)
 
 		if (tx_status & OWN) {
 			/* The packet is not transmitted yet (owned by hardware) !
-			 * Note: the interrupt is generated only when Tx Machine
-			 * is idle, so this is an almost impossible case */
+			 * Note: this is an almost impossible condition
+			 * in case of TxDESC ('descriptor interrupt') */
 			break;
 		}
 
@@ -2273,7 +2259,6 @@ static int sis900_set_config(struct net_device *dev, struct ifmap *map)
 		case IF_PORT_100BASEFX: /* 100BaseFx */
                 	/* These Modes are not supported (are they?)*/
 			return -EOPNOTSUPP;
-			break;
 
 		default:
 			return -EINVAL;
@@ -2441,7 +2426,6 @@ static void sis900_remove(struct pci_dev *pci_dev)
 	pci_iounmap(pci_dev, sis_priv->ioaddr);
 	free_netdev(net_dev);
 	pci_release_regions(pci_dev);
-	pci_set_drvdata(pci_dev, NULL);
 }
 
 #ifdef CONFIG_PM
@@ -2492,7 +2476,7 @@ static int sis900_resume(struct pci_dev *pci_dev)
 	sis900_set_mode(sis_priv, HW_SPEED_10_MBPS, FDX_CAPABLE_HALF_SELECTED);
 
 	/* Enable all known interrupts by setting the interrupt mask. */
-	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE);
+	sw32(imr, RxSOVR | RxORN | RxERR | RxOK | TxURN | TxERR | TxIDLE | TxDESC);
 	sw32(cr, RxENA | sr32(cr));
 	sw32(ier, IE);
 

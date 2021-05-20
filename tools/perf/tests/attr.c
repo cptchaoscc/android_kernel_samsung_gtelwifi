@@ -1,4 +1,3 @@
-
 /*
  * The struct perf_event_attr test support.
  *
@@ -19,14 +18,8 @@
  * permissions. All the event text files are stored there.
  */
 
-/*
- * Powerpc needs __SANE_USERSPACE_TYPES__ before <linux/types.h> to select
- * 'int-ll64.h' and avoid compile warnings when printing __u64 with %llu.
- */
-#define __SANE_USERSPACE_TYPES__
 #include <stdlib.h>
 #include <stdio.h>
-#include <inttypes.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include "../perf.h"
@@ -154,10 +147,10 @@ static int run_dir(const char *d, const char *perf)
 	if (verbose)
 		vcnt++;
 
-	snprintf(cmd, 3*PATH_MAX, PYTHON " %s/attr.py -d %s/attr/ -p %s %.*s",
-		 d, d, perf, vcnt, v);
+	scnprintf(cmd, 3*PATH_MAX, PYTHON " %s/attr.py -d %s/attr/ -p %s %.*s",
+		  d, d, perf, vcnt, v);
 
-	return system(cmd);
+	return system(cmd) ? TEST_FAIL : TEST_OK;
 }
 
 int test__attr(void)
@@ -178,6 +171,5 @@ int test__attr(void)
 	    !lstat(path_perf, &st))
 		return run_dir(path_dir, path_perf);
 
-	fprintf(stderr, " (omitted)");
-	return 0;
+	return TEST_SKIP;
 }

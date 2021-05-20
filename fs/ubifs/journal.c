@@ -363,11 +363,11 @@ again:
 		 * This should not happen unless the journal size limitations
 		 * are too tough.
 		 */
-		ubifs_err("stuck in space allocation");
+		ubifs_err(c, "stuck in space allocation");
 		err = -ENOSPC;
 		goto out;
 	} else if (cmt_retries > 32)
-		ubifs_warn("too many space allocation re-tries (%d)",
+		ubifs_warn(c, "too many space allocation re-tries (%d)",
 			   cmt_retries);
 
 	dbg_jnl("-EAGAIN, commit and retry (retried %d times)",
@@ -380,7 +380,7 @@ again:
 	goto again;
 
 out:
-	ubifs_err("cannot reserve %d bytes in jhead %d, error %d",
+	ubifs_err(c, "cannot reserve %d bytes in jhead %d, error %d",
 		  len, jhead, err);
 	if (err == -ENOSPC) {
 		/* This are some budgeting problems, print useful information */
@@ -546,15 +546,14 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 	int aligned_dlen, aligned_ilen, sync = IS_DIRSYNC(dir);
 	int last_reference = !!(deletion && inode->i_nlink == 0);
 	struct ubifs_inode *ui = ubifs_inode(inode);
-	struct ubifs_inode *dir_ui = ubifs_inode(dir);
+	struct ubifs_inode *host_ui = ubifs_inode(dir);
 	struct ubifs_dent_node *dent;
 	struct ubifs_ino_node *ino;
 	union ubifs_key dent_key, ino_key;
 
 	dbg_jnl("ino %lu, dent '%.*s', data len %d in dir ino %lu",
 		inode->i_ino, nm->len, nm->name, ui->data_len, dir->i_ino);
-	ubifs_assert(dir_ui->data_len == 0);
-	ubifs_assert(mutex_is_locked(&dir_ui->ui_mutex));
+	ubifs_assert(mutex_is_locked(&host_ui->ui_mutex));
 
 	dlen = UBIFS_DENT_NODE_SZ + nm->len + 1;
 	ilen = UBIFS_INO_NODE_SZ;
@@ -572,7 +571,11 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 
 	aligned_dlen = ALIGN(dlen, 8);
 	aligned_ilen = ALIGN(ilen, 8);
+
 	len = aligned_dlen + aligned_ilen + UBIFS_INO_NODE_SZ;
+	/* Make sure to also account for extended attributes */
+	len += host_ui->data_len;
+
 	dent = kmalloc(len, GFP_NOFS);
 	if (!dent)
 		return -ENOMEM;
@@ -649,7 +652,8 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 
 	ino_key_init(c, &ino_key, dir->i_ino);
 	ino_offs += aligned_ilen;
-	err = ubifs_tnc_add(c, &ino_key, lnum, ino_offs, UBIFS_INO_NODE_SZ);
+	err = ubifs_tnc_add(c, &ino_key, lnum, ino_offs,
+			    UBIFS_INO_NODE_SZ + host_ui->data_len);
 	if (err)
 		goto out_ro;
 
@@ -657,8 +661,13 @@ int ubifs_jnl_update(struct ubifs_info *c, const struct inode *dir,
 	spin_lock(&ui->ui_lock);
 	ui->synced_i_size = ui->ui_size;
 	spin_unlock(&ui->ui_lock);
+	if (xent) {
+		spin_lock(&host_ui->ui_lock);
+		host_ui->synced_i_size = host_ui->ui_size;
+		spin_unlock(&host_ui->ui_lock);
+	}
 	mark_inode_clean(c, ui);
-	mark_inode_clean(c, dir_ui);
+	mark_inode_clean(c, host_ui);
 	return 0;
 
 out_finish:
@@ -692,7 +701,7 @@ out_ro:
 int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 			 const union ubifs_key *key, const void *buf, int len)
 {
-	struct ubifs_data_node *data = NULL;
+	struct ubifs_data_node *data;
 	int err, lnum, offs, compr_type, out_len;
 	int dlen = COMPRESSED_DATA_NODE_BUF_SZ, allocated = 1;
 	struct ubifs_inode *ui = ubifs_inode(inode);
@@ -701,7 +710,7 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		(unsigned long)key_inum(c, key), key_block(c, key), len);
 	ubifs_assert(len <= UBIFS_BLOCK_SIZE);
 
-	//data = kmalloc(dlen, GFP_NOFS | __GFP_NOWARN);
+	data = kmalloc(dlen, GFP_NOFS | __GFP_NOWARN);
 	if (!data) {
 		/*
 		 * Fall-back to the write reserve buffer. Note, we might be
@@ -727,7 +736,7 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		compr_type = ui->compr_type;
 
 	out_len = dlen - UBIFS_DATA_NODE_SZ;
-	ubifs_compress(buf, len, &data->data, &out_len, &compr_type);
+	ubifs_compress(c, buf, len, &data->data, &out_len, &compr_type);
 	ubifs_assert(out_len <= UBIFS_BLOCK_SIZE);
 
 	dlen = UBIFS_DATA_NODE_SZ + out_len;
@@ -926,17 +935,15 @@ int ubifs_jnl_rename(struct ubifs_info *c, const struct inode *old_dir,
 	union ubifs_key key;
 	struct ubifs_dent_node *dent, *dent2;
 	int err, dlen1, dlen2, ilen, lnum, offs, len;
-	const struct inode *old_inode = old_dentry->d_inode;
-	const struct inode *new_inode = new_dentry->d_inode;
+	const struct inode *old_inode = d_inode(old_dentry);
+	const struct inode *new_inode = d_inode(new_dentry);
 	int aligned_dlen1, aligned_dlen2, plen = UBIFS_INO_NODE_SZ;
 	int last_reference = !!(new_inode && new_inode->i_nlink == 0);
 	int move = (old_dir != new_dir);
 	struct ubifs_inode *uninitialized_var(new_ui);
 
-	dbg_jnl("dent '%.*s' in dir ino %lu to dent '%.*s' in dir ino %lu",
-		old_dentry->d_name.len, old_dentry->d_name.name,
-		old_dir->i_ino, new_dentry->d_name.len,
-		new_dentry->d_name.name, new_dir->i_ino);
+	dbg_jnl("dent '%pd' in dir ino %lu to dent '%pd' in dir ino %lu",
+		old_dentry, old_dir->i_ino, new_dentry, new_dir->i_ino);
 	ubifs_assert(ubifs_inode(old_dir)->data_len == 0);
 	ubifs_assert(ubifs_inode(new_dir)->data_len == 0);
 	ubifs_assert(mutex_is_locked(&ubifs_inode(old_dir)->ui_mutex));
@@ -1098,7 +1105,8 @@ out_free:
  * This function is used when an inode is truncated and the last data node of
  * the inode has to be re-compressed and re-written.
  */
-static int recomp_data_node(struct ubifs_data_node *dn, int *new_len)
+static int recomp_data_node(const struct ubifs_info *c,
+			    struct ubifs_data_node *dn, int *new_len)
 {
 	void *buf;
 	int err, len, compr_type, out_len;
@@ -1110,11 +1118,11 @@ static int recomp_data_node(struct ubifs_data_node *dn, int *new_len)
 
 	len = le32_to_cpu(dn->ch.len) - UBIFS_DATA_NODE_SZ;
 	compr_type = le16_to_cpu(dn->compr_type);
-	err = ubifs_decompress(&dn->data, len, buf, &out_len, compr_type);
+	err = ubifs_decompress(c, &dn->data, len, buf, &out_len, compr_type);
 	if (err)
 		goto out;
 
-	ubifs_compress(buf, *new_len, &dn->data, &out_len, &compr_type);
+	ubifs_compress(c, buf, *new_len, &dn->data, &out_len, &compr_type);
 	ubifs_assert(out_len <= UBIFS_BLOCK_SIZE);
 	dn->compr_type = cpu_to_le16(compr_type);
 	dn->size = cpu_to_le32(*new_len);
@@ -1159,7 +1167,7 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 
 	sz = UBIFS_TRUN_NODE_SZ + UBIFS_INO_NODE_SZ +
 	     UBIFS_MAX_DATA_NODE_SZ * WORST_COMPR_FACTOR;
-	ino = __vmalloc(sz, GFP_NOFS, PAGE_KERNEL);
+	ino = kmalloc(sz, GFP_NOFS);
 	if (!ino)
 		return -ENOMEM;
 
@@ -1183,13 +1191,22 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 		else if (err)
 			goto out_free;
 		else {
-			if (le32_to_cpu(dn->size) <= dlen)
+			int dn_len = le32_to_cpu(dn->size);
+
+			if (dn_len <= 0 || dn_len > UBIFS_BLOCK_SIZE) {
+				ubifs_err(c, "bad data node (block %u, inode %lu)",
+					  blk, inode->i_ino);
+				ubifs_dump_node(c, dn);
+				goto out_free;
+			}
+
+			if (dn_len <= dlen)
 				dlen = 0; /* Nothing to do */
 			else {
 				int compr_type = le16_to_cpu(dn->compr_type);
 
 				if (compr_type != UBIFS_COMPR_NONE) {
-					err = recomp_data_node(dn, &dlen);
+					err = recomp_data_node(c, dn, &dlen);
 					if (err)
 						goto out_free;
 				} else {
@@ -1254,7 +1271,7 @@ int ubifs_jnl_truncate(struct ubifs_info *c, const struct inode *inode,
 	ui->synced_i_size = ui->ui_size;
 	spin_unlock(&ui->ui_lock);
 	mark_inode_clean(c, ui);
-	vfree(ino);
+	kfree(ino);
 	return 0;
 
 out_release:
@@ -1263,7 +1280,7 @@ out_ro:
 	ubifs_ro_mode(c, err);
 	finish_reservation(c);
 out_free:
-	vfree(ino);
+	kfree(ino);
 	return err;
 }
 

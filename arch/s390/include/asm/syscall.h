@@ -12,7 +12,7 @@
 #ifndef _ASM_SYSCALL_H
 #define _ASM_SYSCALL_H	1
 
-#include <linux/audit.h>
+#include <uapi/linux/audit.h>
 #include <linux/sched.h>
 #include <linux/err.h>
 #include <asm/ptrace.h>
@@ -28,7 +28,7 @@ extern const unsigned int sys_call_table_emu[];
 static inline long syscall_get_nr(struct task_struct *task,
 				  struct pt_regs *regs)
 {
-	return test_tsk_thread_flag(task, TIF_SYSCALL) ?
+	return test_pt_regs_flag(regs, PIF_SYSCALL) ?
 		(regs->int_code & 0xffff) : -1;
 }
 
@@ -41,7 +41,17 @@ static inline void syscall_rollback(struct task_struct *task,
 static inline long syscall_get_error(struct task_struct *task,
 				     struct pt_regs *regs)
 {
-	return IS_ERR_VALUE(regs->gprs[2]) ? regs->gprs[2] : 0;
+	unsigned long error = regs->gprs[2];
+#ifdef CONFIG_COMPAT
+	if (test_tsk_thread_flag(task, TIF_31BIT)) {
+		/*
+		 * Sign-extend the value so (int)-EFOO becomes (long)-EFOO
+		 * and will match correctly in comparisons.
+		 */
+		error = (long)(int)error;
+	}
+#endif
+	return IS_ERR_VALUE(error) ? error : 0;
 }
 
 static inline long syscall_get_return_value(struct task_struct *task,
@@ -54,7 +64,7 @@ static inline void syscall_set_return_value(struct task_struct *task,
 					    struct pt_regs *regs,
 					    int error, long val)
 {
-	regs->gprs[2] = error ? -error : val;
+	regs->gprs[2] = error ? error : val;
 }
 
 static inline void syscall_get_arguments(struct task_struct *task,
@@ -63,6 +73,12 @@ static inline void syscall_get_arguments(struct task_struct *task,
 					 unsigned long *args)
 {
 	unsigned long mask = -1UL;
+
+	/*
+	 * No arguments for this syscall, there's nothing to do.
+	 */
+	if (!n)
+		return;
 
 	BUG_ON(i + n > 6);
 #ifdef CONFIG_COMPAT
@@ -89,13 +105,12 @@ static inline void syscall_set_arguments(struct task_struct *task,
 		regs->orig_gpr2 = args[0];
 }
 
-static inline int syscall_get_arch(struct task_struct *task,
-				   struct pt_regs *regs)
+static inline int syscall_get_arch(void)
 {
 #ifdef CONFIG_COMPAT
-	if (test_tsk_thread_flag(task, TIF_31BIT))
+	if (test_tsk_thread_flag(current, TIF_31BIT))
 		return AUDIT_ARCH_S390;
 #endif
-	return sizeof(long) == 8 ? AUDIT_ARCH_S390X : AUDIT_ARCH_S390;
+	return AUDIT_ARCH_S390X;
 }
 #endif	/* _ASM_SYSCALL_H */

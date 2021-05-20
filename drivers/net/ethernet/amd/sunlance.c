@@ -80,7 +80,6 @@ static char lancestr[] = "LANCE";
 #include <linux/in.h>
 #include <linux/string.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/errno.h>
 #include <linux/socket.h> /* Used for the temporal inet entries and routing */
@@ -1107,7 +1106,7 @@ static void lance_tx_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct lance_private *lp = netdev_priv(dev);
 	int entry, skblen, len;
@@ -1420,7 +1419,7 @@ static int sparc_lance_probe_one(struct platform_device *op,
 
 			prop = of_get_property(nd, "tpe-link-test?", NULL);
 			if (!prop)
-				goto no_link_test;
+				goto node_put;
 
 			if (strcmp(prop, "true")) {
 				printk(KERN_NOTICE "SunLance: warning: overriding option "
@@ -1429,6 +1428,8 @@ static int sparc_lance_probe_one(struct platform_device *op,
 				       "to ecd@skynet.be\n");
 				auxio_set_lte(AUXIO_LTE_ON);
 			}
+node_put:
+			of_node_put(nd);
 no_link_test:
 			lp->auto_select = 1;
 			lp->tpe = 0;
@@ -1470,7 +1471,7 @@ no_link_test:
 		goto fail;
 	}
 
-	dev_set_drvdata(&op->dev, lp);
+	platform_set_drvdata(op, lp);
 
 	printk(KERN_INFO "%s: LANCE %pM\n",
 	       dev->name, dev->dev_addr);
@@ -1501,7 +1502,7 @@ static int sunlance_sbus_probe(struct platform_device *op)
 
 static int sunlance_sbus_remove(struct platform_device *op)
 {
-	struct lance_private *lp = dev_get_drvdata(&op->dev);
+	struct lance_private *lp = platform_get_drvdata(op);
 	struct net_device *net_dev = lp->dev;
 
 	unregister_netdev(net_dev);
@@ -1509,8 +1510,6 @@ static int sunlance_sbus_remove(struct platform_device *op)
 	lance_free_hwresources(lp);
 
 	free_netdev(net_dev);
-
-	dev_set_drvdata(&op->dev, NULL);
 
 	return 0;
 }
@@ -1527,7 +1526,6 @@ MODULE_DEVICE_TABLE(of, sunlance_sbus_match);
 static struct platform_driver sunlance_sbus_driver = {
 	.driver = {
 		.name = "sunlance",
-		.owner = THIS_MODULE,
 		.of_match_table = sunlance_sbus_match,
 	},
 	.probe		= sunlance_sbus_probe,

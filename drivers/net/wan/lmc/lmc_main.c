@@ -49,7 +49,6 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/hdlc.h>
-#include <linux/init.h>
 #include <linux/in.h>
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
@@ -77,7 +76,7 @@
 
 static int LMC_PKT_BUF_SZ = 1542;
 
-static DEFINE_PCI_DEVICE_TABLE(lmc_pci_tbl) = {
+static const struct pci_device_id lmc_pci_tbl[] = {
 	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TULIP_FAST,
 	  PCI_VENDOR_ID_LMC, PCI_ANY_ID },
 	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TULIP_FAST,
@@ -851,6 +850,7 @@ static int lmc_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev = alloc_hdlcdev(sc);
 	if (!dev) {
 		printk(KERN_ERR "lmc:alloc_netdev for device failed\n");
+		err = -ENOMEM;
 		goto err_hdlcdev;
 	}
 
@@ -926,6 +926,8 @@ static int lmc_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
         break;
     default:
 	printk(KERN_WARNING "%s: LMC UNKNOWN CARD!\n", dev->name);
+	unregister_hdlc_device(dev);
+	return -EIO;
         break;
     }
 
@@ -973,7 +975,6 @@ static int lmc_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
     return 0;
 
 err_hdlcdev:
-	pci_set_drvdata(pdev, NULL);
 	kfree(sc);
 err_kzalloc:
 	pci_release_regions(pdev);
@@ -995,7 +996,6 @@ static void lmc_remove_one(struct pci_dev *pdev)
 		free_netdev(dev);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
-		pci_set_drvdata(pdev, NULL);
 	}
 }
 
@@ -1387,7 +1387,7 @@ static irqreturn_t lmc_interrupt (int irq, void *dev_instance) /*fold00*/
             case 0x001:
                 printk(KERN_WARNING "%s: Master Abort (naughty)\n", dev->name);
                 break;
-            case 0x010:
+            case 0x002:
                 printk(KERN_WARNING "%s: Target Abort (not so naughty)\n", dev->name);
                 break;
             default:
@@ -2126,7 +2126,7 @@ bug_out:
 
     spin_unlock_irqrestore(&sc->lmc_lock, flags);
 
-    lmc_trace(dev, "lmc_driver_timout out");
+    lmc_trace(dev, "lmc_driver_timeout out");
 
 
 }

@@ -49,7 +49,8 @@ static const struct lbs_fw_table fw_table[] = {
 	{ MODEL_8388, "libertas/usb8388_v5.bin", NULL },
 	{ MODEL_8388, "libertas/usb8388.bin", NULL },
 	{ MODEL_8388, "usb8388.bin", NULL },
-	{ MODEL_8682, "libertas/usb8682.bin", NULL }
+	{ MODEL_8682, "libertas/usb8682.bin", NULL },
+	{ 0, NULL, NULL }
 };
 
 static struct usb_device_id if_usb_table[] = {
@@ -844,7 +845,7 @@ static void if_usb_prog_firmware(struct lbs_private *priv, int ret,
 	cardp->fw = fw;
 	if (check_fwfile_format(cardp->fw->data, cardp->fw->size)) {
 		ret = -EINVAL;
-		goto release_fw;
+		goto done;
 	}
 
 	/* Cancel any pending usb business */
@@ -861,7 +862,7 @@ restart:
 	if (if_usb_submit_rx_urb_fwload(cardp) < 0) {
 		lbs_deb_usbd(&cardp->udev->dev, "URB submission is failed\n");
 		ret = -EIO;
-		goto release_fw;
+		goto done;
 	}
 
 	cardp->bootcmdresp = 0;
@@ -883,14 +884,14 @@ restart:
 		usb_kill_urb(cardp->tx_urb);
 		if (if_usb_submit_rx_urb(cardp) < 0)
 			ret = -EIO;
-		goto release_fw;
+		goto done;
 	} else if (cardp->bootcmdresp <= 0) {
 		if (--reset_count >= 0) {
 			if_usb_reset_device(cardp);
 			goto restart;
 		}
 		ret = -EIO;
-		goto release_fw;
+		goto done;
 	}
 
 	i = 0;
@@ -921,14 +922,14 @@ restart:
 
 		pr_info("FW download failure, time = %d ms\n", i * 100);
 		ret = -EIO;
-		goto release_fw;
+		goto done;
 	}
 
 	cardp->priv->fw_ready = 1;
 	if_usb_submit_rx_urb(cardp);
 
 	if (lbs_start_card(priv))
-		goto release_fw;
+		goto done;
 
 	if_usb_setup_firmware(priv);
 
@@ -939,11 +940,8 @@ restart:
 	if (lbs_host_sleep_cfg(priv, priv->wol_criteria, NULL))
 		priv->ehs_remove_supported = false;
 
- release_fw:
-	release_firmware(cardp->fw);
-	cardp->fw = NULL;
-
  done:
+	cardp->fw = NULL;
 	lbs_deb_leave(LBS_DEB_USB);
 }
 

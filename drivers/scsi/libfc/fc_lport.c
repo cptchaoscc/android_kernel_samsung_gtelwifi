@@ -516,7 +516,7 @@ static void fc_lport_recv_rnid_req(struct fc_lport *lport,
  * @lport: The local port receiving the LOGO
  * @fp:	   The LOGO request frame
  *
- * Locking Note: The lport lock is exected to be held before calling
+ * Locking Note: The lport lock is expected to be held before calling
  * this function.
  */
 static void fc_lport_recv_logo_req(struct fc_lport *lport, struct fc_frame *fp)
@@ -1088,7 +1088,7 @@ static void fc_lport_error(struct fc_lport *lport, struct fc_frame *fp)
 {
 	unsigned long delay = 0;
 	FC_LPORT_DBG(lport, "Error %ld in state %s, retries %d\n",
-		     PTR_ERR(fp), fc_lport_state(lport),
+		     IS_ERR(fp) ? -PTR_ERR(fp) : 0, fc_lport_state(lport),
 		     lport->retry_count);
 
 	if (PTR_ERR(fp) == -FC_EX_CLOSED)
@@ -1739,14 +1739,14 @@ void fc_lport_flogi_resp(struct fc_seq *sp, struct fc_frame *fp,
 	    fc_frame_payload_op(fp) != ELS_LS_ACC) {
 		FC_LPORT_DBG(lport, "FLOGI not accepted or bad response\n");
 		fc_lport_error(lport, fp);
-		goto err;
+		goto out;
 	}
 
 	flp = fc_frame_payload_get(fp, sizeof(*flp));
 	if (!flp) {
 		FC_LPORT_DBG(lport, "FLOGI bad response\n");
 		fc_lport_error(lport, fp);
-		goto err;
+		goto out;
 	}
 
 	mfs = ntohs(flp->fl_csp.sp_bb_data) &
@@ -1756,7 +1756,7 @@ void fc_lport_flogi_resp(struct fc_seq *sp, struct fc_frame *fp,
 		FC_LPORT_DBG(lport, "FLOGI bad mfs:%hu response, "
 			     "lport->mfs:%hu\n", mfs, lport->mfs);
 		fc_lport_error(lport, fp);
-		goto err;
+		goto out;
 	}
 
 	if (mfs <= lport->mfs) {

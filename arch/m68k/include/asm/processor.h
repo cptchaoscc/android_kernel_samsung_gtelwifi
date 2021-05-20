@@ -153,13 +153,6 @@ static inline void release_thread(struct task_struct *dead_task)
 {
 }
 
-/*
- * Free current thread data structures etc..
- */
-static inline void exit_thread(void)
-{
-}
-
 extern unsigned long thread_saved_pc(struct task_struct *tsk);
 
 unsigned long get_wchan(struct task_struct *p);
@@ -176,5 +169,6 @@ unsigned long get_wchan(struct task_struct *p);
 #define task_pt_regs(tsk)	((struct pt_regs *) ((tsk)->thread.esp0))
 
 #define cpu_relax()	barrier()
+#define cpu_relax_lowlatency() cpu_relax()
 
 #endif

@@ -16,15 +16,22 @@
 #ifndef __ASM_SMP_H
 #define __ASM_SMP_H
 
+#include <asm/percpu.h>
+
 #include <linux/threads.h>
 #include <linux/cpumask.h>
 #include <linux/thread_info.h>
 
-#ifndef CONFIG_SMP
-# error "<asm/smp.h> included in non-SMP build"
-#endif
+DECLARE_PER_CPU_READ_MOSTLY(int, cpu_number);
 
-#define raw_smp_processor_id() (current_thread_info()->cpu)
+/*
+ * We don't use this_cpu_read(cpu_number) as that has implicit writes to
+ * preempt_count, and associated (compiler) barriers, that we'd like to avoid
+ * the expense of. If we're preemptible, the value can be stale at use anyway.
+ * And we can't use this_cpu_ptr() either, as that winds up recursing back
+ * here under CONFIG_DEBUG_PREEMPT=y.
+ */
+#define raw_smp_processor_id() (*raw_cpu_ptr(&cpu_number))
 
 struct seq_file;
 
@@ -39,7 +46,8 @@ extern void show_ipi_list(struct seq_file *p, int prec);
 extern void handle_IPI(int ipinr, struct pt_regs *regs);
 
 /*
- * Setup the set of possible CPUs (via set_cpu_possible)
+ * Discover the set of possible CPUs and determine their
+ * SMP operations.
  */
 extern void smp_init_cpus(void);
 
@@ -47,6 +55,8 @@ extern void smp_init_cpus(void);
  * Provide a function to raise an IPI cross call on CPUs in callmap.
  */
 extern void set_smp_cross_call(void (*)(const struct cpumask *, unsigned int));
+
+extern void (*__smp_cross_call)(const struct cpumask *, unsigned int);
 
 /*
  * Called from the secondary holding pen, this is the secondary CPU entry point.
@@ -58,23 +68,28 @@ asmlinkage void secondary_start_kernel(void);
  */
 struct secondary_data {
 	void *stack;
+#ifdef CONFIG_THREAD_INFO_IN_TASK
+	struct task_struct *task;
+#endif
 };
 extern struct secondary_data secondary_data;
-extern void secondary_holding_pen(void);
-extern volatile unsigned long secondary_holding_pen_release;
+extern void secondary_entry(void);
 
 extern void arch_send_call_function_single_ipi(int cpu);
 extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
 
-struct device_node;
+#ifdef CONFIG_ARM64_ACPI_PARKING_PROTOCOL
+extern void arch_send_wakeup_ipi_mask(const struct cpumask *mask);
+#else
+static inline void arch_send_wakeup_ipi_mask(const struct cpumask *mask)
+{
+	BUILD_BUG();
+}
+#endif
 
-struct smp_enable_ops {
-	const char	*name;
-	int		(*init_cpu)(struct device_node *, int);
-	int		(*prepare_cpu)(int);
-};
+extern int __cpu_disable(void);
 
-extern const struct smp_enable_ops smp_spin_table_ops;
-extern const struct smp_enable_ops smp_psci_ops;
+extern void __cpu_die(unsigned int cpu);
+extern void cpu_die(void);
 
 #endif /* ifndef __ASM_SMP_H */

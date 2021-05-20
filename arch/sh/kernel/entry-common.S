@@ -108,7 +108,7 @@ need_resched:
 	and	#(0xf0>>1), r0		! interrupts off (exception path)?
 	cmp/eq	#(0xf0>>1), r0
 	bt	noresched
-	mov.l	3f, r0
+	mov.l	1f, r0
 	jsr	@r0			! call preempt_schedule_irq
 	 nop
 	bra	need_resched
@@ -119,9 +119,7 @@ noresched:
 	 nop
 
 	.align 2
-1:	.long	PREEMPT_ACTIVE
-2:	.long	schedule
-3:	.long	preempt_schedule_irq
+1:	.long	preempt_schedule_irq
 #endif
 
 ENTRY(resume_userspace)
@@ -195,17 +193,17 @@ syscall_trace_entry:
 	!			Reload R0-R4 from kernel stack, where the
 	!   	    	    	parent may have modified them using
 	!   	    	    	ptrace(POKEUSR).  (Note that R0-R2 are
-	!   	    	    	used by the system call handler directly
-	!   	    	    	from the kernel stack anyway, so don't need
-	!   	    	    	to be reloaded here.)  This allows the parent
-	!   	    	    	to rewrite system calls and args on the fly.
+	!   	    	    	reloaded from the kernel stack by syscall_call
+	!   	    	    	below, so don't need to be reloaded here.)
+	!   	    	    	This allows the parent to rewrite system calls
+	!   	    	    	and args on the fly.
 	mov.l	@(OFF_R4,r15), r4   ! arg0
 	mov.l	@(OFF_R5,r15), r5
 	mov.l	@(OFF_R6,r15), r6
 	mov.l	@(OFF_R7,r15), r7   ! arg3
 	mov.l	@(OFF_R3,r15), r3   ! syscall_nr
 	!
-	mov.l	2f, r10			! Number of syscalls
+	mov.l	6f, r10			! Number of syscalls
 	cmp/hs	r10, r3
 	bf	syscall_call
 	mov	#-ENOSYS, r0
@@ -257,7 +255,7 @@ debug_trap:
 	mov.l	@r8, r8
 	jsr	@r8
 	 nop
-	bra	__restore_all
+	bra	ret_from_exception
 	 nop
 	CFI_ENDPROC
 
@@ -350,7 +348,7 @@ ENTRY(system_call)
 	tst	r9, r8
 	bf	syscall_trace_entry
 	!
-	mov.l	2f, r8			! Number of syscalls
+	mov.l	6f, r8			! Number of syscalls
 	cmp/hs	r8, r3
 	bt	syscall_badsys
 	!
@@ -359,8 +357,15 @@ syscall_call:
 	mov.l	3f, r8		! Load the address of sys_call_table
 	add	r8, r3
 	mov.l	@r3, r8
+	mov.l	@(OFF_R2,r15), r2
+	mov.l	@(OFF_R1,r15), r1
+	mov.l	@(OFF_R0,r15), r0
+	mov.l	r2, @-r15
+	mov.l	r1, @-r15
+	mov.l	r0, @-r15
 	jsr	@r8	    	! jump to specific syscall handler
 	 nop
+	add	#12, r15
 	mov.l	@(OFF_R0,r15), r12		! save r0
 	mov.l	r0, @(OFF_R0,r15)		! save the return value
 	!
@@ -382,7 +387,7 @@ syscall_exit:
 #if !defined(CONFIG_CPU_SH2)
 1:	.long	TRA
 #endif
-2:	.long	NR_syscalls
+6:	.long	NR_syscalls
 3:	.long	sys_call_table
 7:	.long	do_syscall_trace_enter
 8:	.long	do_syscall_trace_leave

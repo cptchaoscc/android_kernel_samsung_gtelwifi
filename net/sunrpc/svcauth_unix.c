@@ -347,13 +347,13 @@ ip_map_cached_get(struct svc_xprt *xprt)
 		spin_lock(&xprt->xpt_lock);
 		ipm = xprt->xpt_auth_cache;
 		if (ipm != NULL) {
-			if (!cache_valid(&ipm->h)) {
+			sn = net_generic(xprt->xpt_net, sunrpc_net_id);
+			if (cache_is_expired(sn->ip_map_cache, &ipm->h)) {
 				/*
 				 * The entry has been invalidated since it was
 				 * remembered, e.g. by a second mount from the
 				 * same IP address.
 				 */
-				sn = net_generic(xprt->xpt_net, sunrpc_net_id);
 				xprt->xpt_auth_cache = NULL;
 				spin_unlock(&xprt->xpt_lock);
 				cache_put(&ipm->h, sn->ip_map_cache);
@@ -520,6 +520,7 @@ static int unix_gid_parse(struct cache_detail *cd,
 		GROUP_AT(ug.gi, i) = kgid;
 	}
 
+	groups_sort(ug.gi);
 	ugp = unix_gid_lookup(cd, uid);
 	if (ugp) {
 		struct cache_head *ch;
@@ -827,6 +828,7 @@ svcauth_unix_accept(struct svc_rqst *rqstp, __be32 *authp)
 		kgid_t kgid = make_kgid(&init_user_ns, svc_getnl(argv));
 		GROUP_AT(cred->cr_group_info, i) = kgid;
 	}
+	groups_sort(cred->cr_group_info);
 	if (svc_getu32(argv) != htonl(RPC_AUTH_NULL) || svc_getu32(argv) != 0) {
 		*authp = rpc_autherr_badverf;
 		return SVC_DENIED;

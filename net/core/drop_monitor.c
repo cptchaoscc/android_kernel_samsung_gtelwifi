@@ -64,7 +64,6 @@ static struct genl_family net_drop_monitor_family = {
 	.hdrsize        = 0,
 	.name           = "NET_DM",
 	.version        = 2,
-	.maxattr        = NET_DM_CMD_MAX,
 };
 
 static DEFINE_PER_CPU(struct per_cpu_dm_data, dm_cpu_data);
@@ -81,6 +80,7 @@ static struct sk_buff *reset_per_cpu_data(struct per_cpu_dm_data *data)
 	struct nlattr *nla;
 	struct sk_buff *skb;
 	unsigned long flags;
+	void *msg_header;
 
 	al = sizeof(struct net_dm_alert_msg);
 	al += dm_hit_limit * sizeof(struct net_dm_drop_point);
@@ -88,23 +88,47 @@ static struct sk_buff *reset_per_cpu_data(struct per_cpu_dm_data *data)
 
 	skb = genlmsg_new(al, GFP_KERNEL);
 
-	if (skb) {
-		genlmsg_put(skb, 0, 0, &net_drop_monitor_family,
-				0, NET_DM_CMD_ALERT);
-		nla = nla_reserve(skb, NLA_UNSPEC,
-				  sizeof(struct net_dm_alert_msg));
-		msg = nla_data(nla);
-		memset(msg, 0, al);
-	} else {
-		mod_timer(&data->send_timer, jiffies + HZ / 10);
-	}
+	if (!skb)
+		goto err;
 
+	msg_header = genlmsg_put(skb, 0, 0, &net_drop_monitor_family,
+				 0, NET_DM_CMD_ALERT);
+	if (!msg_header) {
+		nlmsg_free(skb);
+		skb = NULL;
+		goto err;
+	}
+	nla = nla_reserve(skb, NLA_UNSPEC,
+			  sizeof(struct net_dm_alert_msg));
+	if (!nla) {
+		nlmsg_free(skb);
+		skb = NULL;
+		goto err;
+	}
+	msg = nla_data(nla);
+	memset(msg, 0, al);
+	goto out;
+
+err:
+	mod_timer(&data->send_timer, jiffies + HZ / 10);
+out:
 	spin_lock_irqsave(&data->lock, flags);
 	swap(data->skb, skb);
 	spin_unlock_irqrestore(&data->lock, flags);
 
+	if (skb) {
+		struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
+		struct genlmsghdr *gnlh = (struct genlmsghdr *)nlmsg_data(nlh);
+
+		genlmsg_end(skb, genlmsg_data(gnlh));
+	}
+
 	return skb;
 }
+
+static struct genl_multicast_group dropmon_mcgrps[] = {
+	{ .name = "events", },
+};
 
 static void send_dm_alert(struct work_struct *work)
 {
@@ -116,7 +140,8 @@ static void send_dm_alert(struct work_struct *work)
 	skb = reset_per_cpu_data(data);
 
 	if (skb)
-		genlmsg_multicast(skb, 0, NET_DM_GRP_ALERT, GFP_KERNEL);
+		genlmsg_multicast(&net_drop_monitor_family, skb, 0,
+				  0, GFP_KERNEL);
 }
 
 /*
@@ -134,6 +159,7 @@ static void sched_send_work(unsigned long _data)
 static void trace_drop_common(struct sk_buff *skb, void *location)
 {
 	struct net_dm_alert_msg *msg;
+	struct net_dm_drop_point *point;
 	struct nlmsghdr *nlh;
 	struct nlattr *nla;
 	int i;
@@ -142,7 +168,7 @@ static void trace_drop_common(struct sk_buff *skb, void *location)
 	unsigned long flags;
 
 	local_irq_save(flags);
-	data = &__get_cpu_var(dm_cpu_data);
+	data = this_cpu_ptr(&dm_cpu_data);
 	spin_lock(&data->lock);
 	dskb = data->skb;
 
@@ -152,11 +178,13 @@ static void trace_drop_common(struct sk_buff *skb, void *location)
 	nlh = (struct nlmsghdr *)dskb->data;
 	nla = genlmsg_data(nlmsg_data(nlh));
 	msg = nla_data(nla);
+	point = msg->points;
 	for (i = 0; i < msg->entries; i++) {
-		if (!memcmp(&location, msg->points[i].pc, sizeof(void *))) {
-			msg->points[i].count++;
+		if (!memcmp(&location, &point->pc, sizeof(void *))) {
+			point->count++;
 			goto out;
 		}
+		point++;
 	}
 	if (msg->entries == dm_hit_limit)
 		goto out;
@@ -165,8 +193,8 @@ static void trace_drop_common(struct sk_buff *skb, void *location)
 	 */
 	__nla_reserve_nohdr(dskb, sizeof(struct net_dm_drop_point));
 	nla->nla_len += NLA_ALIGN(sizeof(struct net_dm_drop_point));
-	memcpy(msg->points[msg->entries].pc, &location, sizeof(void *));
-	msg->points[msg->entries].count = 1;
+	memcpy(point->pc, &location, sizeof(void *));
+	point->count = 1;
 	msg->entries++;
 
 	if (!timer_pending(&data->send_timer)) {
@@ -285,19 +313,17 @@ static int net_dm_cmd_trace(struct sk_buff *skb,
 	switch (info->genlhdr->cmd) {
 	case NET_DM_CMD_START:
 		return set_all_monitor_traces(TRACE_ON);
-		break;
 	case NET_DM_CMD_STOP:
 		return set_all_monitor_traces(TRACE_OFF);
-		break;
 	}
 
 	return -ENOTSUPP;
 }
 
 static int dropmon_net_event(struct notifier_block *ev_block,
-			unsigned long event, void *ptr)
+			     unsigned long event, void *ptr)
 {
-	struct net_device *dev = ptr;
+	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
 	struct dm_hw_stat_delta *new_stat = NULL;
 	struct dm_hw_stat_delta *tmp;
 
@@ -333,7 +359,7 @@ out:
 	return NOTIFY_DONE;
 }
 
-static struct genl_ops dropmon_ops[] = {
+static const struct genl_ops dropmon_ops[] = {
 	{
 		.cmd = NET_DM_CMD_CONFIG,
 		.doit = net_dm_cmd_config,
@@ -364,13 +390,13 @@ static int __init init_net_drop_monitor(void)
 		return -ENOSPC;
 	}
 
-	rc = genl_register_family_with_ops(&net_drop_monitor_family,
-					   dropmon_ops,
-					   ARRAY_SIZE(dropmon_ops));
+	rc = genl_register_family_with_ops_groups(&net_drop_monitor_family,
+						  dropmon_ops, dropmon_mcgrps);
 	if (rc) {
 		pr_err("Could not create drop monitor netlink family\n");
 		return rc;
 	}
+	WARN_ON(net_drop_monitor_family.mcgrp_offset != NET_DM_GRP_ALERT);
 
 	rc = register_netdevice_notifier(&dropmon_net_notifier);
 	if (rc < 0) {

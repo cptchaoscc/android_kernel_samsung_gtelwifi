@@ -13,7 +13,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/device.h>
@@ -38,6 +37,14 @@ ssize_t led_trigger_store(struct device *dev, struct device_attribute *attr,
 	char trigger_name[TRIG_NAME_MAX];
 	struct led_trigger *trig;
 	size_t len;
+	int ret = count;
+
+	mutex_lock(&led_cdev->led_access);
+
+	if (led_sysfs_is_disabled(led_cdev)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
 
 	trigger_name[sizeof(trigger_name) - 1] = '\0';
 	strncpy(trigger_name, buf, sizeof(trigger_name) - 1);
@@ -48,7 +55,7 @@ ssize_t led_trigger_store(struct device *dev, struct device_attribute *attr,
 
 	if (!strcmp(trigger_name, "none")) {
 		led_trigger_remove(led_cdev);
-		return count;
+		goto unlock;
 	}
 
 	down_read(&triggers_list_lock);
@@ -59,12 +66,14 @@ ssize_t led_trigger_store(struct device *dev, struct device_attribute *attr,
 			up_write(&led_cdev->trigger_lock);
 
 			up_read(&triggers_list_lock);
-			return count;
+			goto unlock;
 		}
 	}
 	up_read(&triggers_list_lock);
 
-	return -EINVAL;
+unlock:
+	mutex_unlock(&led_cdev->led_access);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(led_trigger_store);
 
@@ -79,21 +88,23 @@ ssize_t led_trigger_show(struct device *dev, struct device_attribute *attr,
 	down_read(&led_cdev->trigger_lock);
 
 	if (!led_cdev->trigger)
-		len += sprintf(buf+len, "[none] ");
+		len += scnprintf(buf+len, PAGE_SIZE - len, "[none] ");
 	else
-		len += sprintf(buf+len, "none ");
+		len += scnprintf(buf+len, PAGE_SIZE - len, "none ");
 
 	list_for_each_entry(trig, &trigger_list, next_trig) {
 		if (led_cdev->trigger && !strcmp(led_cdev->trigger->name,
 							trig->name))
-			len += sprintf(buf+len, "[%s] ", trig->name);
+			len += scnprintf(buf+len, PAGE_SIZE - len, "[%s] ",
+					 trig->name);
 		else
-			len += sprintf(buf+len, "%s ", trig->name);
+			len += scnprintf(buf+len, PAGE_SIZE - len, "%s ",
+					 trig->name);
 	}
 	up_read(&led_cdev->trigger_lock);
 	up_read(&triggers_list_lock);
 
-	len += sprintf(len+buf, "\n");
+	len += scnprintf(len+buf, PAGE_SIZE - len, "\n");
 	return len;
 }
 EXPORT_SYMBOL_GPL(led_trigger_show);
@@ -220,9 +231,12 @@ void led_trigger_unregister(struct led_trigger *trig)
 {
 	struct led_classdev *led_cdev;
 
+	if (list_empty_careful(&trig->next_trig))
+		return;
+
 	/* Remove from the list of led triggers */
 	down_write(&triggers_list_lock);
-	list_del(&trig->next_trig);
+	list_del_init(&trig->next_trig);
 	up_write(&triggers_list_lock);
 
 	/* Remove anyone actively using this trigger */
@@ -242,18 +256,14 @@ EXPORT_SYMBOL_GPL(led_trigger_unregister);
 void led_trigger_event(struct led_trigger *trig,
 			enum led_brightness brightness)
 {
-	struct list_head *entry;
+	struct led_classdev *led_cdev;
 
 	if (!trig)
 		return;
 
 	read_lock(&trig->leddev_list_lock);
-	list_for_each(entry, &trig->led_cdevs) {
-		struct led_classdev *led_cdev;
-
-		led_cdev = list_entry(entry, struct led_classdev, trig_list);
+	list_for_each_entry(led_cdev, &trig->led_cdevs, trig_list)
 		led_set_brightness(led_cdev, brightness);
-	}
 	read_unlock(&trig->leddev_list_lock);
 }
 EXPORT_SYMBOL_GPL(led_trigger_event);
@@ -264,16 +274,13 @@ static void led_trigger_blink_setup(struct led_trigger *trig,
 			     int oneshot,
 			     int invert)
 {
-	struct list_head *entry;
+	struct led_classdev *led_cdev;
 
 	if (!trig)
 		return;
 
 	read_lock(&trig->leddev_list_lock);
-	list_for_each(entry, &trig->led_cdevs) {
-		struct led_classdev *led_cdev;
-
-		led_cdev = list_entry(entry, struct led_classdev, trig_list);
+	list_for_each_entry(led_cdev, &trig->led_cdevs, trig_list) {
 		if (oneshot)
 			led_blink_set_oneshot(led_cdev, delay_on, delay_off,
 					      invert);

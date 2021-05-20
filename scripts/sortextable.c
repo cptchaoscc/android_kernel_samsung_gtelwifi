@@ -31,6 +31,26 @@
 #include <tools/be_byteshift.h>
 #include <tools/le_byteshift.h>
 
+#ifndef EM_ARCOMPACT
+#define EM_ARCOMPACT	93
+#endif
+
+#ifndef EM_XTENSA
+#define EM_XTENSA	94
+#endif
+
+#ifndef EM_AARCH64
+#define EM_AARCH64	183
+#endif
+
+#ifndef EM_MICROBLAZE
+#define EM_MICROBLAZE	189
+#endif
+
+#ifndef EM_ARCV2
+#define EM_ARCV2	195
+#endif
+
 static int fd_map;	/* File descriptor for file being modified. */
 static int mmap_failed; /* Boolean flag. */
 static void *ehdr_curr; /* current ElfXX_Ehdr *  for resource cleanup */
@@ -59,14 +79,6 @@ fail_file(void)
 	cleanup();
 	longjmp(jmpenv, SJ_FAIL);
 }
-
-static void __attribute__((noreturn))
-succeed_file(void)
-{
-	cleanup();
-	longjmp(jmpenv, SJ_SUCCEED);
-}
-
 
 /*
  * Get the whole file as a programming convenience in order to avoid
@@ -156,6 +168,30 @@ static void (*w2)(uint16_t, uint16_t *);
 
 typedef void (*table_sort_t)(char *, int);
 
+/*
+ * Move reserved section indices SHN_LORESERVE..SHN_HIRESERVE out of
+ * the way to -256..-1, to avoid conflicting with real section
+ * indices.
+ */
+#define SPECIAL(i) ((i) - (SHN_HIRESERVE + 1))
+
+static inline int is_shndx_special(unsigned int i)
+{
+	return i != SHN_XINDEX && i >= SHN_LORESERVE && i <= SHN_HIRESERVE;
+}
+
+/* Accessor for sym->st_shndx, hides ugliness of "64k sections" */
+static inline unsigned int get_secindex(unsigned int shndx,
+					unsigned int sym_offs,
+					const Elf32_Word *symtab_shndx_start)
+{
+	if (is_shndx_special(shndx))
+		return SPECIAL(shndx);
+	if (shndx != SHN_XINDEX)
+		return shndx;
+	return r(&symtab_shndx_start[sym_offs]);
+}
+
 /* 32 bit and 64 bit are very similar */
 #include "sortextable.h"
 #define SORTEXTABLE_64
@@ -230,9 +266,9 @@ do_file(char const *const fname)
 		break;
 	}  /* end switch */
 	if (memcmp(ELFMAG, ehdr->e_ident, SELFMAG) != 0
-	||  r2(&ehdr->e_type) != ET_EXEC
+	||  (r2(&ehdr->e_type) != ET_EXEC && r2(&ehdr->e_type) != ET_DYN)
 	||  ehdr->e_ident[EI_VERSION] != EV_CURRENT) {
-		fprintf(stderr, "unrecognized ET_EXEC file %s\n", fname);
+		fprintf(stderr, "unrecognized ET_EXEC/ET_DYN file %s\n", fname);
 		fail_file();
 	}
 
@@ -246,10 +282,15 @@ do_file(char const *const fname)
 	case EM_386:
 	case EM_X86_64:
 	case EM_S390:
+	case EM_AARCH64:
 		custom_sort = sort_relative_table;
 		break;
+	case EM_ARCOMPACT:
+	case EM_ARCV2:
 	case EM_ARM:
+	case EM_MICROBLAZE:
 	case EM_MIPS:
+	case EM_XTENSA:
 		break;
 	}  /* end switch */
 
@@ -263,7 +304,7 @@ do_file(char const *const fname)
 		if (r2(&ehdr->e_ehsize) != sizeof(Elf32_Ehdr)
 		||  r2(&ehdr->e_shentsize) != sizeof(Elf32_Shdr)) {
 			fprintf(stderr,
-				"unrecognized ET_EXEC file: %s\n", fname);
+				"unrecognized ET_EXEC/ET_DYN file: %s\n", fname);
 			fail_file();
 		}
 		do32(ehdr, fname, custom_sort);
@@ -273,7 +314,7 @@ do_file(char const *const fname)
 		if (r2(&ghdr->e_ehsize) != sizeof(Elf64_Ehdr)
 		||  r2(&ghdr->e_shentsize) != sizeof(Elf64_Shdr)) {
 			fprintf(stderr,
-				"unrecognized ET_EXEC file: %s\n", fname);
+				"unrecognized ET_EXEC/ET_DYN file: %s\n", fname);
 			fail_file();
 		}
 		do64(ghdr, fname, custom_sort);

@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2012 IBM Corporation
  *
- * Author: Ashley Lai <adlai@us.ibm.com>
+ * Author: Ashley Lai <ashleydlai@gmail.com>
  *
  * Maintained by: <tpmdd-devel@lists.sourceforge.net>
  *
@@ -22,15 +22,16 @@
 struct ibmvtpm_crq {
 	u8 valid;
 	u8 msg;
-	u16 len;
-	u32 data;
-	u64 reserved;
+	__be16 len;
+	__be32 data;
+	__be64 reserved;
 } __attribute__((packed, aligned(8)));
 
 struct ibmvtpm_crq_queue {
 	struct ibmvtpm_crq *crq_addr;
 	u32 index;
 	u32 num_entry;
+	wait_queue_head_t wq;
 };
 
 struct ibmvtpm_dev {

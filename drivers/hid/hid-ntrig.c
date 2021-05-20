@@ -238,7 +238,7 @@ static ssize_t set_min_width(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	if (val > nd->sensor_physical_width)
@@ -273,7 +273,7 @@ static ssize_t set_min_height(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	if (val > nd->sensor_physical_height)
@@ -307,7 +307,7 @@ static ssize_t set_activate_slack(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	if (val > 0x7f)
@@ -342,7 +342,7 @@ static ssize_t set_activation_width(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	if (val > nd->sensor_physical_width)
@@ -378,7 +378,7 @@ static ssize_t set_activation_height(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	if (val > nd->sensor_physical_height)
@@ -412,7 +412,7 @@ static ssize_t set_deactivate_slack(struct device *dev,
 
 	unsigned long val;
 
-	if (strict_strtoul(buf, 0, &val))
+	if (kstrtoul(buf, 0, &val))
 		return -EINVAL;
 
 	/*
@@ -864,10 +864,9 @@ static int ntrig_input_configured(struct hid_device *hid,
 
 {
 	struct input_dev *input = hidinput->input;
-	int ret = 0;
 
 	if (hidinput->report->maxfield < 1)
-		return ret;
+		return 0;
 
 	switch (hidinput->report->field[0]->application) {
 	case HID_DG_PEN:
@@ -891,7 +890,8 @@ static int ntrig_input_configured(struct hid_device *hid,
 							"N-Trig MultiTouch";
 		break;
 	}
-	return ret;
+
+	return 0;
 }
 
 static int ntrig_probe(struct hid_device *hdev, const struct hid_device_id *id)
@@ -955,6 +955,8 @@ static int ntrig_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	ret = sysfs_create_group(&hdev->dev.kobj,
 			&ntrig_attribute_group);
+	if (ret)
+		hid_err(hdev, "cannot create sysfs group\n");
 
 	return 0;
 err_free:

@@ -155,6 +155,8 @@ struct raw3270_fn {
 struct raw3270_view {
 	struct list_head list;
 	spinlock_t lock;
+#define RAW3270_VIEW_LOCK_IRQ	0
+#define RAW3270_VIEW_LOCK_BH	1
 	atomic_t ref_count;
 	struct raw3270 *dev;
 	struct raw3270_fn *fn;
@@ -163,7 +165,7 @@ struct raw3270_view {
 	unsigned char *ascebc;		/* ascii -> ebcdic table */
 };
 
-int raw3270_add_view(struct raw3270_view *, struct raw3270_fn *, int);
+int raw3270_add_view(struct raw3270_view *, struct raw3270_fn *, int, int);
 int raw3270_activate_view(struct raw3270_view *);
 void raw3270_del_view(struct raw3270_view *);
 void raw3270_deactivate_view(struct raw3270_view *);
@@ -173,6 +175,7 @@ int raw3270_start_locked(struct raw3270_view *, struct raw3270_request *);
 int raw3270_start_irq(struct raw3270_view *, struct raw3270_request *);
 int raw3270_reset(struct raw3270_view *);
 struct raw3270_view *raw3270_view(struct raw3270_view *);
+int raw3270_view_active(struct raw3270_view *);
 
 /* Reference count inliner for view structures. */
 static inline void
@@ -190,7 +193,7 @@ raw3270_put_view(struct raw3270_view *view)
 		wake_up(&raw3270_wait_queue);
 }
 
-struct raw3270 *raw3270_setup_console(struct ccw_device *cdev);
+struct raw3270 *raw3270_setup_console(void);
 void raw3270_wait_cons_dev(struct raw3270 *);
 
 /* Notifier for device addition/removal */

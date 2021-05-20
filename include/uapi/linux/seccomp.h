@@ -10,6 +10,15 @@
 #define SECCOMP_MODE_STRICT	1 /* uses hard-coded filter. */
 #define SECCOMP_MODE_FILTER	2 /* uses user-supplied filter. */
 
+/* Valid operations for seccomp syscall. */
+#define SECCOMP_SET_MODE_STRICT	0
+#define SECCOMP_SET_MODE_FILTER	1
+
+/* Valid flags for SECCOMP_SET_MODE_FILTER */
+#define SECCOMP_FILTER_FLAG_TSYNC	(1UL << 0)
+/* In v4.14+ SECCOMP_FILTER_FLAG_LOG is (1UL << 1) */
+#define SECCOMP_FILTER_FLAG_SPEC_ALLOW	(1UL << 2)
+
 /*
  * All BPF programs must return a 32-bit value.
  * The bottom 16-bits are for optional return data.

@@ -31,6 +31,8 @@
 static unsigned int verbose;
 module_param(verbose, int, 0644);
 
+/* Max transfer size done by I2C transfer functions */
+#define MAX_XFER_SIZE  64
 
 #define FE_ERROR		0
 #define FE_NOTICE		1
@@ -183,13 +185,20 @@ static int stb6100_read_reg(struct stb6100_state *state, u8 reg)
 static int stb6100_write_reg_range(struct stb6100_state *state, u8 buf[], int start, int len)
 {
 	int rc;
-	u8 cmdbuf[len + 1];
+	u8 cmdbuf[MAX_XFER_SIZE];
 	struct i2c_msg msg = {
 		.addr	= state->config->tuner_address,
 		.flags	= 0,
 		.buf	= cmdbuf,
 		.len	= len + 1
 	};
+
+	if (1 + len > sizeof(cmdbuf)) {
+		printk(KERN_WARNING
+		       "%s: i2c wr: len=%d is too big!\n",
+		       KBUILD_MODNAME, len);
+		return -EINVAL;
+	}
 
 	if (unlikely(start < 1 || start + len > STB6100_NUMREGS)) {
 		dprintk(verbose, FE_ERROR, 1, "Invalid register range %d:%d",
@@ -217,12 +226,14 @@ static int stb6100_write_reg_range(struct stb6100_state *state, u8 buf[], int st
 
 static int stb6100_write_reg(struct stb6100_state *state, u8 reg, u8 data)
 {
+	u8 tmp = data; /* see gcc.gnu.org/bugzilla/show_bug.cgi?id=81715 */
+
 	if (unlikely(reg >= STB6100_NUMREGS)) {
 		dprintk(verbose, FE_ERROR, 1, "Invalid register offset 0x%x", reg);
 		return -EREMOTEIO;
 	}
-	data = (data & stb6100_template[reg].mask) | stb6100_template[reg].set;
-	return stb6100_write_reg_range(state, &data, reg, 1);
+	tmp = (tmp & stb6100_template[reg].mask) | stb6100_template[reg].set;
+	return stb6100_write_reg_range(state, &tmp, reg, 1);
 }
 
 

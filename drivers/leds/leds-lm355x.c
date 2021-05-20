@@ -177,18 +177,19 @@ static int lm355x_chip_init(struct lm355x_chip_data *chip)
 	/* input and output pins configuration */
 	switch (chip->type) {
 	case CHIP_LM3554:
-		reg_val = pdata->pin_tx2 | pdata->ntc_pin;
+		reg_val = (u32)pdata->pin_tx2 | (u32)pdata->ntc_pin;
 		ret = regmap_update_bits(chip->regmap, 0xE0, 0x28, reg_val);
 		if (ret < 0)
 			goto out;
-		reg_val = pdata->pass_mode;
+		reg_val = (u32)pdata->pass_mode;
 		ret = regmap_update_bits(chip->regmap, 0xA0, 0x04, reg_val);
 		if (ret < 0)
 			goto out;
 		break;
 
 	case CHIP_LM3556:
-		reg_val = pdata->pin_tx2 | pdata->ntc_pin | pdata->pass_mode;
+		reg_val = (u32)pdata->pin_tx2 | (u32)pdata->ntc_pin |
+		          (u32)pdata->pass_mode;
 		ret = regmap_update_bits(chip->regmap, 0x0A, 0xC4, reg_val);
 		if (ret < 0)
 			goto out;
@@ -413,6 +414,12 @@ out:
 
 static DEVICE_ATTR(pattern, S_IWUSR, NULL, lm3556_indicator_pattern_store);
 
+static struct attribute *lm355x_indicator_attrs[] = {
+	&dev_attr_pattern.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(lm355x_indicator);
+
 static const struct regmap_config lm355x_regmap = {
 	.reg_bits = 8,
 	.val_bits = 8,
@@ -423,7 +430,7 @@ static const struct regmap_config lm355x_regmap = {
 static int lm355x_probe(struct i2c_client *client,
 				  const struct i2c_device_id *id)
 {
-	struct lm355x_platform_data *pdata = client->dev.platform_data;
+	struct lm355x_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct lm355x_chip_data *chip;
 
 	int err;
@@ -501,25 +508,18 @@ static int lm355x_probe(struct i2c_client *client,
 	else
 		chip->cdev_indicator.max_brightness = 8;
 	chip->cdev_indicator.brightness_set = lm355x_indicator_brightness_set;
+	/* indicator pattern control only for LM3556 */
+	if (id->driver_data == CHIP_LM3556)
+		chip->cdev_indicator.groups = lm355x_indicator_groups;
 	err = led_classdev_register((struct device *)
 				    &client->dev, &chip->cdev_indicator);
 	if (err < 0)
 		goto err_create_indicator_file;
-	/* indicator pattern control only for LM3554 */
-	if (id->driver_data == CHIP_LM3556) {
-		err =
-		    device_create_file(chip->cdev_indicator.dev,
-				       &dev_attr_pattern);
-		if (err < 0)
-			goto err_create_pattern_file;
-	}
 
 	dev_info(&client->dev, "%s is initialized\n",
 		 lm355x_name[id->driver_data]);
 	return 0;
 
-err_create_pattern_file:
-	led_classdev_unregister(&chip->cdev_indicator);
 err_create_indicator_file:
 	led_classdev_unregister(&chip->cdev_torch);
 err_create_torch_file:
@@ -534,8 +534,6 @@ static int lm355x_remove(struct i2c_client *client)
 	struct lm355x_reg_data *preg = chip->regs;
 
 	regmap_write(chip->regmap, preg[REG_OPMODE].regno, 0);
-	if (chip->type == CHIP_LM3556)
-		device_remove_file(chip->cdev_indicator.dev, &dev_attr_pattern);
 	led_classdev_unregister(&chip->cdev_indicator);
 	flush_work(&chip->work_indicator);
 	led_classdev_unregister(&chip->cdev_torch);
@@ -558,7 +556,6 @@ MODULE_DEVICE_TABLE(i2c, lm355x_id);
 static struct i2c_driver lm355x_i2c_driver = {
 	.driver = {
 		   .name = LM355x_NAME,
-		   .owner = THIS_MODULE,
 		   .pm = NULL,
 		   },
 	.probe = lm355x_probe,

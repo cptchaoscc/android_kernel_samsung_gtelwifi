@@ -19,12 +19,15 @@
 
 #include <linux/init.h>
 #include <linux/linkage.h>
+#include <linux/irqchip/arm-gic-v3.h>
 
 #include <asm/assembler.h>
 #include <asm/ptrace.h>
 #include <asm/virt.h>
 
 	.text
+	.pushsection	.hyp.text, "ax"
+
 	.align 11
 
 ENTRY(__hyp_stub_vectors)

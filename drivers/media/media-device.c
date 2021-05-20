@@ -24,6 +24,7 @@
 #include <linux/export.h>
 #include <linux/ioctl.h>
 #include <linux/media.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <media/media-device.h>
@@ -103,12 +104,8 @@ static long media_device_enum_entities(struct media_device *mdev,
 		return -EINVAL;
 
 	u_ent.id = ent->id;
-	if (ent->name) {
-		strncpy(u_ent.name, ent->name, sizeof(u_ent.name));
-		u_ent.name[sizeof(u_ent.name) - 1] = '\0';
-	} else {
-		memset(u_ent.name, 0, sizeof(u_ent.name));
-	}
+	if (ent->name)
+		strlcpy(u_ent.name, ent->name, sizeof(u_ent.name));
 	u_ent.type = ent->type;
 	u_ent.revision = ent->revision;
 	u_ent.flags = ent->flags;
@@ -143,6 +140,8 @@ static long __media_device_enum_links(struct media_device *mdev,
 
 		for (p = 0; p < entity->num_pads; p++) {
 			struct media_pad_desc pad;
+
+			memset(&pad, 0, sizeof(pad));
 			media_device_kpad_to_upad(&entity->pads[p], &pad);
 			if (copy_to_user(&links->pads[p], &pad, sizeof(pad)))
 				return -EFAULT;
@@ -160,6 +159,7 @@ static long __media_device_enum_links(struct media_device *mdev,
 			if (entity->links[l].source->entity != entity)
 				continue;
 
+			memset(&link, 0, sizeof(link));
 			media_device_kpad_to_upad(entity->links[l].source,
 						  &link.source);
 			media_device_kpad_to_upad(entity->links[l].sink,
@@ -235,7 +235,7 @@ static long media_device_ioctl(struct file *filp, unsigned int cmd,
 			       unsigned long arg)
 {
 	struct media_devnode *devnode = media_devnode_data(filp);
-	struct media_device *dev = to_media_device(devnode);
+	struct media_device *dev = devnode->media_dev;
 	long ret;
 
 	switch (cmd) {
@@ -304,7 +304,7 @@ static long media_device_compat_ioctl(struct file *filp, unsigned int cmd,
 				      unsigned long arg)
 {
 	struct media_devnode *devnode = media_devnode_data(filp);
-	struct media_device *dev = to_media_device(devnode);
+	struct media_device *dev = devnode->media_dev;
 	long ret;
 
 	switch (cmd) {
@@ -345,7 +345,8 @@ static const struct media_file_operations media_device_fops = {
 static ssize_t show_model(struct device *cd,
 			  struct device_attribute *attr, char *buf)
 {
-	struct media_device *mdev = to_media_device(to_media_devnode(cd));
+	struct media_devnode *devnode = to_media_devnode(cd);
+	struct media_device *mdev = devnode->media_dev;
 
 	return sprintf(buf, "%.*s\n", (int)sizeof(mdev->model), mdev->model);
 }
@@ -370,8 +371,10 @@ static void media_device_release(struct media_devnode *mdev)
  * - dev must point to the parent device
  * - model must be filled with the device model name
  */
-int __must_check media_device_register(struct media_device *mdev)
+int __must_check __media_device_register(struct media_device *mdev,
+					 struct module *owner)
 {
+	struct media_devnode *devnode;
 	int ret;
 
 	if (WARN_ON(mdev->dev == NULL || mdev->model[0] == 0))
@@ -382,23 +385,34 @@ int __must_check media_device_register(struct media_device *mdev)
 	spin_lock_init(&mdev->lock);
 	mutex_init(&mdev->graph_mutex);
 
-	/* Register the device node. */
-	mdev->devnode.fops = &media_device_fops;
-	mdev->devnode.parent = mdev->dev;
-	mdev->devnode.release = media_device_release;
-	ret = media_devnode_register(&mdev->devnode);
-	if (ret < 0)
-		return ret;
+	devnode = kzalloc(sizeof(*devnode), GFP_KERNEL);
+	if (!devnode)
+		return -ENOMEM;
 
-	ret = device_create_file(&mdev->devnode.dev, &dev_attr_model);
+	/* Register the device node. */
+	mdev->devnode = devnode;
+	devnode->fops = &media_device_fops;
+	devnode->parent = mdev->dev;
+	devnode->release = media_device_release;
+	ret = media_devnode_register(mdev, devnode, owner);
 	if (ret < 0) {
-		media_devnode_unregister(&mdev->devnode);
+		/* devnode free is handled in media_devnode_*() */
+		mdev->devnode = NULL;
+		return ret;
+	}
+
+	ret = device_create_file(&devnode->dev, &dev_attr_model);
+	if (ret < 0) {
+		/* devnode free is handled in media_devnode_*() */
+		mdev->devnode = NULL;
+		media_devnode_unregister_prepare(devnode);
+		media_devnode_unregister(devnode);
 		return ret;
 	}
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(media_device_register);
+EXPORT_SYMBOL_GPL(__media_device_register);
 
 /**
  * media_device_unregister - unregister a media device
@@ -410,11 +424,16 @@ void media_device_unregister(struct media_device *mdev)
 	struct media_entity *entity;
 	struct media_entity *next;
 
+	/* Clear the devnode register bit to avoid races with media dev open */
+	media_devnode_unregister_prepare(mdev->devnode);
+
 	list_for_each_entry_safe(entity, next, &mdev->entities, list)
 		media_device_unregister_entity(entity);
 
-	device_remove_file(&mdev->devnode.dev, &dev_attr_model);
-	media_devnode_unregister(&mdev->devnode);
+	device_remove_file(&mdev->devnode->dev, &dev_attr_model);
+	media_devnode_unregister(mdev->devnode);
+	/* devnode free is handled in media_devnode_*() */
+	mdev->devnode = NULL;
 }
 EXPORT_SYMBOL_GPL(media_device_unregister);
 

@@ -65,61 +65,6 @@ static inline struct meta *skb_meta(struct sk_buff *skb)
 	return (struct meta *)skb->cb;
 }
 
-static void recv_queue_timer_callback(unsigned long data);
-static void traverse_receive_queue(struct sock *sk)
-{
-	struct pppox_sock *po = pppox_sk(sk);
-	struct pppopns_opt *opt = &pppox_sk(sk)->proto.pns;
-
-	struct sk_buff *skb;
-	struct sk_buff *skb1;
-	struct meta *meta;
-	__u32 now = jiffies;	
-
-	/* Remove packets from receive queue as long as
-	 * 1. the receive buffer is full,
-	 * 2. they are queued longer than one second, or
-	 * 3. there are no missing packets before them. */
-	skb_queue_walk_safe(&sk->sk_receive_queue, skb, skb1) {
-		meta = skb_meta(skb);
-		if (atomic_read(&sk->sk_rmem_alloc) < sk->sk_rcvbuf &&
-		    now - meta->timestamp < (HZ - 5) &&
-		    meta->sequence != opt->recv_sequence)
-		  break;
-		skb_unlink(skb, &sk->sk_receive_queue);
-		opt->recv_sequence = meta->sequence + 1;
-		skb_orphan(skb);
-		ppp_input(&po->chan, skb);
-	}
-	
-	if (skb_queue_len(&sk->sk_receive_queue) > 0) {
-		/* Start the timer. The timer will
-		   expire after one second. When the 
-		   timer expires, the receive_queue is 
-		   checked and all packets older than 
-		   one second are removed from the queue and
-		   passed forward. */
-	  	if (timer_pending(&po->recv_queue_timer)) {
-	        	/* Something is wrong. Recv timer is already active. However, Ignoring...*/
-		} else {	  
-			init_timer(&po->recv_queue_timer);
-			po->recv_queue_timer.data = (unsigned long)sk;
-			po->recv_queue_timer.function = recv_queue_timer_callback;
-			po->recv_queue_timer.expires = now + HZ;
-			add_timer(&po->recv_queue_timer);
-		}
-	}
-}
-
-static void recv_queue_timer_callback(unsigned long data)
-{
-  struct sock *sk = (struct sock *)data;
-
-  spin_lock(&pppox_sk(sk)->recv_queue_lock);
-  traverse_receive_queue(sk);
-  spin_unlock(&pppox_sk(sk)->recv_queue_lock);
-}
-
 /******************************************************************************/
 
 static int pppopns_recv_core(struct sock *sk_raw, struct sk_buff *skb)
@@ -176,17 +121,14 @@ static int pppopns_recv_core(struct sock *sk_raw, struct sk_buff *skb)
 	/* Perform reordering if sequencing is enabled. */
 	if (hdr->bits & PPTP_GRE_SEQ_BIT) {
 		struct sk_buff *skb1;
-		spin_lock(&pppox_sk(sk)->recv_queue_lock);
 
 		/* Insert the packet into receive queue in order. */
 		skb_set_owner_r(skb, sk);
 		skb_queue_walk(&sk->sk_receive_queue, skb1) {
 			struct meta *meta1 = skb_meta(skb1);
 			__s32 order = meta->sequence - meta1->sequence;
-			if (order == 0) {
-				spin_unlock(&pppox_sk(sk)->recv_queue_lock);
+			if (order == 0)
 				goto drop;
-			}
 			if (order < 0) {
 				meta->timestamp = meta1->timestamp;
 				skb_insert(skb1, skb, &sk->sk_receive_queue);
@@ -198,12 +140,22 @@ static int pppopns_recv_core(struct sock *sk_raw, struct sk_buff *skb)
 			meta->timestamp = now;
 			skb_queue_tail(&sk->sk_receive_queue, skb);
 		}
-		
-		if (timer_pending(&pppox_sk(sk)->recv_queue_timer)) {
-			del_timer_sync(&pppox_sk(sk)->recv_queue_timer);
+
+		/* Remove packets from receive queue as long as
+		 * 1. the receive buffer is full,
+		 * 2. they are queued longer than one second, or
+		 * 3. there are no missing packets before them. */
+		skb_queue_walk_safe(&sk->sk_receive_queue, skb, skb1) {
+			meta = skb_meta(skb);
+			if (atomic_read(&sk->sk_rmem_alloc) < sk->sk_rcvbuf &&
+					now - meta->timestamp < HZ &&
+					meta->sequence != opt->recv_sequence)
+				break;
+			skb_unlink(skb, &sk->sk_receive_queue);
+			opt->recv_sequence = meta->sequence + 1;
+			skb_orphan(skb);
+			ppp_input(&pppox_sk(sk)->chan, skb);
 		}
-		traverse_receive_queue(sk);
-		spin_unlock(&pppox_sk(sk)->recv_queue_lock);
 		return NET_RX_SUCCESS;
 	}
 
@@ -217,7 +169,7 @@ drop:
 	return NET_RX_DROP;
 }
 
-static void pppopns_recv(struct sock *sk_raw, int length)
+static void pppopns_recv(struct sock *sk_raw)
 {
 	struct sk_buff *skb;
 	while ((skb = skb_dequeue(&sk_raw->sk_receive_queue))) {
@@ -238,11 +190,12 @@ static void pppopns_xmit_core(struct work_struct *delivery_work)
 		struct sock *sk_raw = skb->sk;
 		struct kvec iov = {.iov_base = skb->data, .iov_len = skb->len};
 		struct msghdr msg = {
-			.msg_iov = (struct iovec *)&iov,
-			.msg_iovlen = 1,
 			.msg_flags = MSG_NOSIGNAL | MSG_DONTWAIT,
 		};
-		sk_raw->sk_prot->sendmsg(NULL, sk_raw, &msg, skb->len);
+
+		iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iov, 1,
+			      skb->len);
+		sk_raw->sk_prot->sendmsg(sk_raw, &msg, skb->len);
 		kfree_skb(skb);
 	}
 	set_fs(old_fs);
@@ -366,7 +319,6 @@ out:
 static int pppopns_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
-	struct pppox_sock *po = pppox_sk(sk);
 
 	if (!sk)
 		return 0;
@@ -375,14 +327,6 @@ static int pppopns_release(struct socket *sock)
 	if (sock_flag(sk, SOCK_DEAD)) {
 		release_sock(sk);
 		return -EBADF;
-	}
-
-	if (po) {
-		spin_lock(&po->recv_queue_lock);
-		if (po && timer_pending( &po->recv_queue_timer )) {	    
-			del_timer_sync( &po->recv_queue_timer );
-		}
-		spin_unlock(&po->recv_queue_lock);
 	}
 
 	if (sk->sk_state != PPPOX_NONE) {
@@ -432,13 +376,11 @@ static struct proto_ops pppopns_proto_ops = {
 	.mmap = sock_no_mmap,
 };
 
-static int pppopns_create(struct net *net, struct socket *sock)
+static int pppopns_create(struct net *net, struct socket *sock, int kern)
 {
 	struct sock *sk;
-	struct pppox_sock *po;
-	struct pppopns_opt *opt;
 
-	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppopns_proto);
+	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppopns_proto, kern);
 	if (!sk)
 		return -ENOMEM;
 
@@ -447,51 +389,13 @@ static int pppopns_create(struct net *net, struct socket *sock)
 	sock->ops = &pppopns_proto_ops;
 	sk->sk_protocol = PX_PROTO_OPNS;
 	sk->sk_state = PPPOX_NONE;
-
-	po = pppox_sk(sk);
-	opt = &po->proto.pns;
-	opt->ppp_flags = SC_GRE_SEQ_CHK;
-	init_timer(&po->recv_queue_timer);
-	spin_lock_init(&po->recv_queue_lock);
-
 	return 0;
-}
-
-static int pppopns_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
-{
-
-        struct sock *sk = sock->sk;
-	struct pppox_sock *po = pppox_sk(sk);
-	struct pppopns_opt *opt = &po->proto.pns;
-	void __user *argp = (void __user *)arg;
-	int __user *p = argp;
-	int err = -ENOTTY, val;
-
-	switch (cmd) {
-	case PPPIOCGFLAGS:
-		printk("Getting pppopns socket flags.\n");
-		val = opt->ppp_flags;
-		if (put_user(val, p))
-			break;
-		err = 0;
-		break;
-	case PPPIOCSFLAGS:
-		printk("Setting pppopns socket flags.\n");
-		if (get_user(val, p))
-			break;
-		opt->ppp_flags = val;
-		err = 0;
-		break;
-	}
-       
-	return err;
 }
 
 /******************************************************************************/
 
 static struct pppox_proto pppopns_pppox_proto = {
 	.create = pppopns_create,
-	.ioctl = pppopns_ioctl,
 	.owner = THIS_MODULE,
 };
 

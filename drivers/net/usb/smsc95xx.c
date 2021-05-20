@@ -13,14 +13,12 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
  *
  *****************************************************************************/
 
 #include <linux/module.h>
 #include <linux/kmod.h>
-#include <linux/init.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
@@ -729,6 +727,9 @@ static int smsc95xx_ethtool_set_wol(struct net_device *net,
 	struct smsc95xx_priv *pdata = (struct smsc95xx_priv *)(dev->data[0]);
 	int ret;
 
+	if (wolinfo->wolopts & ~SUPPORTED_WAKE)
+		return -EINVAL;
+
 	pdata->wolopts = wolinfo->wolopts & SUPPORTED_WAKE;
 
 	ret = device_set_wakeup_enable(&dev->udev->dev, pdata->wolopts);
@@ -1135,11 +1136,14 @@ static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 
 	/* Init all registers */
 	ret = smsc95xx_reset(dev);
+	if (ret)
+		goto free_pdata;
 
 	/* detect device revision as different features may be available */
 	ret = smsc95xx_read_reg(dev, ID_REV, &val);
 	if (ret < 0)
-		return ret;
+		goto free_pdata;
+
 	val >>= 16;
 
 	if ((val == ID_REV_CHIP_ID_9500A_) || (val == ID_REV_CHIP_ID_9530_) ||
@@ -1156,6 +1160,10 @@ static int smsc95xx_bind(struct usbnet *dev, struct usb_interface *intf)
 	dev->net->hard_header_len += SMSC95XX_TX_OVERHEAD_CSUM;
 	dev->hard_mtu = dev->net->mtu + dev->net->hard_header_len;
 	return 0;
+
+free_pdata:
+	kfree(pdata);
+	return ret;
 }
 
 static void smsc95xx_unbind(struct usbnet *dev, struct usb_interface *intf)
@@ -1672,12 +1680,14 @@ done:
 static int smsc95xx_resume(struct usb_interface *intf)
 {
 	struct usbnet *dev = usb_get_intfdata(intf);
-	struct smsc95xx_priv *pdata = (struct smsc95xx_priv *)(dev->data[0]);
-	u8 suspend_flags = pdata->suspend_flags;
+	struct smsc95xx_priv *pdata;
+	u8 suspend_flags;
 	int ret;
 	u32 val;
 
 	BUG_ON(!dev);
+	pdata = (struct smsc95xx_priv *)(dev->data[0]);
+	suspend_flags = pdata->suspend_flags;
 
 	netdev_dbg(dev->net, "resume suspend_flags=0x%02x\n", suspend_flags);
 
@@ -1716,6 +1726,18 @@ static int smsc95xx_resume(struct usb_interface *intf)
 	return ret;
 }
 
+static int smsc95xx_reset_resume(struct usb_interface *intf)
+{
+	struct usbnet *dev = usb_get_intfdata(intf);
+	int ret;
+
+	ret = smsc95xx_reset(dev);
+	if (ret < 0)
+		return ret;
+
+	return smsc95xx_resume(intf);
+}
+
 static void smsc95xx_rx_csum_offload(struct sk_buff *skb)
 {
 	skb->csum = *(u16 *)(skb_tail_pointer(skb) - 2);
@@ -1725,6 +1747,10 @@ static void smsc95xx_rx_csum_offload(struct sk_buff *skb)
 
 static int smsc95xx_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 {
+	/* This check is no longer done by usbnet */
+	if (skb->len < dev->net->hard_header_len)
+		return 0;
+
 	while (skb->len > 0) {
 		u32 header, align_count;
 		struct sk_buff *ax_skb;
@@ -1799,11 +1825,6 @@ static int smsc95xx_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 			skb_pull(skb, align_count);
 	}
 
-	if (unlikely(skb->len < 0)) {
-		netdev_warn(dev->net, "invalid rx length<0 %d\n", skb->len);
-		return 0;
-	}
-
 	return 1;
 }
 
@@ -1824,13 +1845,13 @@ static struct sk_buff *smsc95xx_tx_fixup(struct usbnet *dev,
 	/* We do not advertise SG, so skbs should be already linearized */
 	BUG_ON(skb_shinfo(skb)->nr_frags);
 
-	if (skb_headroom(skb) < overhead) {
-		struct sk_buff *skb2 = skb_copy_expand(skb,
-			overhead, 0, flags);
+	/* Make writable and expand header space by overhead if required */
+	if (skb_cow_head(skb, overhead)) {
+		/* Must deallocate here as returning NULL to indicate error
+		 * means the skb won't be deallocated in the caller.
+		 */
 		dev_kfree_skb_any(skb);
-		skb = skb2;
-		if (!skb)
-			return NULL;
+		return NULL;
 	}
 
 	if (csum) {
@@ -2002,7 +2023,7 @@ static struct usb_driver smsc95xx_driver = {
 	.probe		= usbnet_probe,
 	.suspend	= smsc95xx_suspend,
 	.resume		= smsc95xx_resume,
-	.reset_resume	= smsc95xx_resume,
+	.reset_resume	= smsc95xx_reset_resume,
 	.disconnect	= usbnet_disconnect,
 	.disable_hub_initiated_lpm = 1,
 	.supports_autosuspend = 1,

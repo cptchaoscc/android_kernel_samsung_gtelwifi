@@ -351,7 +351,9 @@ static void cm109_urb_irq_callback(struct urb *urb)
 	if (status) {
 		if (status == -ESHUTDOWN)
 			return;
-		dev_err(&dev->intf->dev, "%s: urb status %d\n", __func__, status);
+		dev_err_ratelimited(&dev->intf->dev, "%s: urb status %d\n",
+				    __func__, status);
+		goto out;
 	}
 
 	/* Special keys */
@@ -418,8 +420,12 @@ static void cm109_urb_ctl_callback(struct urb *urb)
 	     dev->ctl_data->byte[2],
 	     dev->ctl_data->byte[3]);
 
-	if (status)
-		dev_err(&dev->intf->dev, "%s: urb status %d\n", __func__, status);
+	if (status) {
+		if (status == -ESHUTDOWN)
+			return;
+		dev_err_ratelimited(&dev->intf->dev, "%s: urb status %d\n",
+				    __func__, status);
+	}
 
 	spin_lock(&dev->ctl_submit_lock);
 
@@ -427,7 +433,7 @@ static void cm109_urb_ctl_callback(struct urb *urb)
 
 	if (likely(!dev->shutdown)) {
 
-		if (dev->buzzer_pending) {
+		if (dev->buzzer_pending || status) {
 			dev->buzzer_pending = 0;
 			dev->ctl_urb_pending = 1;
 			cm109_submit_buzz_toggle(dev);
@@ -540,12 +546,15 @@ static int cm109_input_open(struct input_dev *idev)
 	dev->ctl_data->byte[HID_OR2] = dev->keybit;
 	dev->ctl_data->byte[HID_OR3] = 0x00;
 
+	dev->ctl_urb_pending = 1;
 	error = usb_submit_urb(dev->urb_ctl, GFP_KERNEL);
-	if (error)
+	if (error) {
+		dev->ctl_urb_pending = 0;
 		dev_err(&dev->intf->dev, "%s: usb_submit_urb (urb_ctl) failed %d\n",
 			__func__, error);
-	else
+	} else {
 		dev->open = 1;
+	}
 
 	mutex_unlock(&dev->pm_mutex);
 
@@ -669,6 +678,10 @@ static int cm109_usb_probe(struct usb_interface *intf,
 	int error = -ENOMEM;
 
 	interface = intf->cur_altsetting;
+
+	if (interface->desc.bNumEndpoints < 1)
+		return -ENODEV;
+
 	endpoint = &interface->endpoint[0].desc;
 
 	if (!usb_endpoint_is_int_in(endpoint))
